@@ -12,7 +12,6 @@
 #include <sys/timerfd.h>
 #include <assert.h>
 #include <pthread.h>
-
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -32,19 +31,6 @@
 #include "jmpp/jmpp_raw_stream_api.h"
 #include <jmpp/jmpp_api.h>
 
-// hsunchi code.
-#include "dlib/image_processing/frontal_face_detector.h"
-#include "dlib/image_processing/render_face_detections.h"
-#include "dlib/image_processing.h"
-#include "dlib/image_io.h"
-#include "dlib/opencv.h"
-#include "dlib/array.h"
-
-// hsunchi code.
-#include "opencv2/core/core.hpp"
-#include "opencv2/imgproc.hpp"
-#include "opencv2/imgcodecs.hpp"
-
 #include "rknn_api.h"
 #include "ssd.h"
 
@@ -52,88 +38,105 @@
 #include "digit.h"
 #include "nycu_mhw_api.h"
 
-// hsunchi code.
+// For eye close detection.
+#include "dlib/image_processing/frontal_face_detector.h"
+#include "dlib/image_processing/render_face_detections.h"
+#include "dlib/image_processing.h"
+#include "dlib/image_io.h"
+#include "dlib/opencv.h"
+#include "dlib/array.h"
+
+// For eye close detection.
+#include "opencv2/core/core.hpp"
+#include "opencv2/imgproc.hpp"
+#include "opencv2/imgcodecs.hpp"
+
+// For eye close detection.
 using namespace std;
 using namespace std::chrono;
 using namespace dlib;
 
-// Set this to image size.
-#define MODEL_INPUT_SIZE 300
 
-// For min distance calculation.
-#define VEHICLE_WIDTH_METER 1.75
+#define NUM_NPU_FD 2
+
+// For nanomsg.
+int sock = 0;
+
+const int CAMERA_ID = 0;
+
+// Check RGA hardware limitation at https://reurl.cc/y7n2W8 .
+const int MODEL_INPUT_WIDTH      = 300;                 // Set this to image size of model input.
+const int MODEL_INPUT_HEIGHT     = 300;                 // Set this to image size of model input.
+const int RGA_INPUT_WIDTH        = 544;                 // Copy the value from mild.json .
+const int RGA_INPUT_HEIGHT       = 304;                 // Copy the value from mild.json .
+const int RGA_OUTPUT_WIDTH       = 532;                 // Calculate from RGA_INPUT_* .
+const int RGA_OUTPUT_HEIGHT      = MODEL_INPUT_HEIGHT;  // Calculate from RGA_INPUT_* .
+const int RGA_OUTPUT_CROP_OFFSET = 116;                 // Crop left part and right part to make the image from 16:9 to 1:1 .
+
+const int RGA_BUFFER_INPUT_SIZE  = RGA_INPUT_WIDTH * RGA_INPUT_HEIGHT * 3;
+const int RGA_BUFFER_OUTPUT_SIZE = RGA_OUTPUT_WIDTH * RGA_OUTPUT_HEIGHT * 3;
+const int RGA_BUFFER_SCALED_SIZE = MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT * 3;
+
+// Define safe zone in image.
+const int MODEL_DETECT_BOUNDARY_TOP    = 150;
+const int MODEL_DETECT_BOUNDARY_BOTTOM = 299;
+const int MODEL_DETECT_BOUNDARY_LEFT   = 100;
+const int MODEL_DETECT_BOUNDARY_RIGHT  = 199;
+
+// Define object detection model path.
+const char* SSD_OD_MODEL_PATH = "model/ssd_inception_v2_rv1109_rv1126.rknn";
+
+// Define eye close detection model path.
+const char *SSD_EC_MODEL_PATH = "model/vgg16_eyeclose.rknn";
+
+// For min car distance calculation.
+const double VEHICLE_WIDTH_METER = 1.75;
 const double TAN_OF_HHVIEW = tan(get_config_vehicle_camHorizontalAngleDegree() / 180.0 * M_PI * 0.5);
 
-const int CAMERA_ID = 0;  // camera id 0
-const int RGA_INPUT_WIDTH = 544;
-const int RGA_INPUT_HEIGHT = 304;
-const int RGA_OUTPUT_WIDTH = 532;
-const int RGA_OUTPUT_HEIGHT = MODEL_INPUT_SIZE;
-const int RGA_OUTPUT_CROP_OFFSET = 116;
-
-const char* SSD_MODEL_PATH = "model/ssd_inception_v2_rv1109_rv1126.rknn";
-//const char* SSD_MODEL_PATH = "model/MobilenetV2_SSD_Lite_bc.rknn";
-
-// hsunchi model.
-const char *HSUNCHI_SSD_MODEL_PATH = "model/vgg16_eyeclose.rknn";
-
-const int RGA_BUFFER_INPUT_SIZE = RGA_INPUT_WIDTH * RGA_INPUT_HEIGHT * 3;
-const int RGA_BUFFER_OUTPUT_SIZE = RGA_OUTPUT_WIDTH * RGA_OUTPUT_HEIGHT * 3;
-const int RGA_BUFFER_SCALED_SIZE = MODEL_INPUT_SIZE * MODEL_INPUT_SIZE * 3;
-const int MAX_RKNN_LIST_NUM = 5;
-const int MAX_IMAGE_LIST_NUM = 5;
-
-const int MODEL_DETECT_BOUNDARY_TOP = 150;
-const int MODEL_DETECT_BOUNDARY_BOTTOM = 299;
-const int MODEL_DETECT_BOUNDARY_LEFT = 100;
-const int MODEL_DETECT_BOUNDARY_RIGHT = 199;
-
-/*! Depending on the video decoder pipeline, video input color space can either be NV12 or NV16 */
-
-int mpower_npu_enable;          // mpower process enable or disable
-int mpower_2D_graphic_enable;   // mpower helps do some 2D drawing on the frame
+// Depending on the video decoder pipeline, video input color space can either be NV12 or NV16.
+int mpower_npu_enable;          // Enable or disable mpower process.
+int mpower_2D_graphic_enable;   // Mpower helps do some 2D drawing on the frame.
 int npu_resolution_width;
 int npu_resolution_height;
 
 IMAGE_TYPE_E  npu_color_space;
 
-JMPP_RAW_STREAM_S raw_stream;    // do not modify this data or read structure data directly.
-                                 // always use API to access information.
-                                 // this may take a large memory. declare as a global variable
+// Do not modify this data or read structure data directly.
+// Always use API to access information.
+// This may take a large memory. Declare as a global variable.
+JMPP_RAW_STREAM_S raw_stream;
 
 int raw_stream_vi_chn;
 int raw_stream_vi_pipe;
 
-uint32_t raw_stream_data_size = 0;
-uint8_t *raw_stream_data_addr = 0;
-uint64_t raw_stream_data_timestamp = 0;
-uint32_t      raw_stream_data_width = 0;
-uint32_t      raw_stream_data_height = 0;
-IMAGE_TYPE_E  raw_stream_data_color_space = IMAGE_TYPE_UNKNOW;
+uint32_t     raw_stream_data_size        = 0;
+uint8_t*     raw_stream_data_addr        = 0;
+uint64_t     raw_stream_data_timestamp   = 0;
+uint32_t     raw_stream_data_width       = 0;
+uint32_t     raw_stream_data_height      = 0;
+IMAGE_TYPE_E raw_stream_data_color_space = IMAGE_TYPE_UNKNOW;
 
-// hsunchi
-uint32_t        image_size_h = 0;
+uint32_t     rga_image_size              = 0;
+uint64_t     rga_image_timestamp         = 0;
+uint32_t     rga_image_width             = 0;
+uint32_t     rga_image_height            = 0;
+IMAGE_TYPE_E rga_image_color_space       = IMAGE_TYPE_UNKNOW;
 
-// Howard
-uint32_t        image_size_hi = 0;
+// These memory will be released at the end of main function.
+uint8_t*     rga_image_buffer_addr       = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);
+uint8_t*     rga_image_addr              = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);
+uint8_t*     rga_image_cropped_addr      = (uint8_t*)malloc(RGA_BUFFER_SCALED_SIZE);
+uint8_t*     mcd_image_addr              = (uint8_t*)malloc(RGA_BUFFER_SCALED_SIZE);  // For minimum car distance calculation.
+uint8_t*     ecd_image_addr              = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);  // For eye close detection.
 
-uint8_t*        image_addr         = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);  // These memory will be released at the end of main function.
-uint8_t*        image_drawing_addr = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);
-uint8_t*        image_drawing_cropped_addr = (uint8_t*)malloc(RGA_BUFFER_SCALED_SIZE);
-
-uint64_t        image_timestamp = 0;
-uint32_t        image_width = 0;
-uint32_t        image_height = 0;
-IMAGE_TYPE_E    image_color_space = IMAGE_TYPE_UNKNOW;
-
-int image_id = -1;
-int image_id_prev = -1;
-
-rknn_context rknn_ctx, hsunchi_rknn_ctx;
-rknn_input_output_num rknn_io_num, hsunchi_rknn_io_num;
+int rga_image_id = -1;
+int rga_image_prev_id = -1;
 
 
-// rknn list structure.
+const int MAX_RKNN_LIST_NUM = 5;
+
+
+// Define rknn list structure.
 typedef struct node
 {
     long timeval;
@@ -147,10 +150,8 @@ typedef struct my_stack
     Node *top;
 } rknn_list;
 
-rknn_list *rknn_list_all_;
 
-
-// Color struct.
+// Define color struct.
 typedef struct
 {
     int red = 0;
@@ -158,6 +159,17 @@ typedef struct
     int blue = 0;
 } Color;
 
+
+rknn_context          rknn_ctx_od, rknn_ctx_ecd;
+rknn_input_output_num rknn_io_num_od, rknn_io_num_ecd;
+
+// For minimum car distance calculation.
+// Save all car detection results.
+rknn_list*            rknn_list_mcd = NULL;
+
+
+// Declare common colors.
+// Define color codes in main() .
 Color COLOR_RED;
 Color COLOR_GREEN;
 Color COLOR_BLUE;
@@ -184,25 +196,26 @@ void crop_hFlip_image(uint8_t*, uint8_t*);
 static long getCurrentTimeMsec();
 
 
-// Main
+// Main.
 
 int main()
 {
-    // Define color codes.
+    // Define common color codes.
     COLOR_RED.red = 255;
     COLOR_GREEN.green = 255;
     COLOR_BLUE.blue = 255;
 
-    #define NUM_NPU_FD 2
-    int r = 0, hr = 0;
-    int model_len = 0, hsunchi_model_len = 0;
-    unsigned char *model = nullptr, *hsunchi_model = nullptr;
+    int r = 0;
+    int model_od_len = 0, model_ecd_len = 0;
+    unsigned char *model_od = nullptr;
+    unsigned char *model_ecd = nullptr;
 
 
-    create_rknn_list(&rknn_list_all_);
+    create_rknn_list(&rknn_list_mcd);
+
     wait_jmpp_init_complete();
-    jmpp_api_init();  // before calling JMPP API. Need to initialize it
-    npu_config_json_get();  // read mpower NPU configuration
+    jmpp_api_init();  // Before calling JMPP API. Need to initialize it.
+    npu_config_json_get();  // Read mpower NPU configuration.
 
 
     // open raw stream(224x224)
@@ -296,16 +309,10 @@ int main()
         }
     }
 
-    // ::sleep(1);
-    // FILE* fout = fopen("image.raw", "wb");
-    // fwrite(image_addr, 1, image_size_hi, fout);
-    // fclose(fout);
-    // printf("[!!!] Saved a raw image to disk.\n");
-
-    // Preload rknn model.
-    printf("Loading model ...\n");
-    model = load_model(SSD_MODEL_PATH, &model_len);
-    r = rknn_init(&rknn_ctx, model, model_len, 0);
+    // Preload OD rknn model.
+    printf("Loading OD model ...\n");
+    model_od = load_model(SSD_OD_MODEL_PATH, &model_od_len);
+    r = rknn_init(&rknn_ctx_od, model_od, model_od_len, 0);
     
     if(r < 0)
     {
@@ -314,7 +321,7 @@ int main()
     else
     {
         // Get Model Input Output Info
-        r = rknn_query(rknn_ctx, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num, sizeof(rknn_io_num));
+        r = rknn_query(rknn_ctx_od, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_od, sizeof(rknn_io_num_od));
         
         if(r != RKNN_SUCC)
         {
@@ -323,18 +330,18 @@ int main()
         else
         {
             printf("Model loaded successfully.\n");
-            printf("Model input num: %d, output num: %d\n", rknn_io_num.n_input, rknn_io_num.n_output);
+            printf("Model input num: %d, output num: %d\n", rknn_io_num_od.n_input, rknn_io_num_od.n_output);
 
             {
                 printf("Model input tensors:\n");
                 
-                rknn_tensor_attr input_attrs[rknn_io_num.n_input];
+                rknn_tensor_attr input_attrs[rknn_io_num_od.n_input];
                 memset(input_attrs, 0, sizeof(input_attrs));
                 
-                for(unsigned int i = 0; i < rknn_io_num.n_input; i++)
+                for(unsigned int i = 0; i < rknn_io_num_od.n_input; i++)
                 {
                     input_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+                    r = rknn_query(rknn_ctx_od, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
                     
                     if(r != RKNN_SUCC)
                     {
@@ -350,13 +357,13 @@ int main()
             {
                 printf("Model output tensors:\n");
                 
-                rknn_tensor_attr output_attrs[rknn_io_num.n_output];
+                rknn_tensor_attr output_attrs[rknn_io_num_od.n_output];
                 memset(output_attrs, 0, sizeof(output_attrs));
                 
-                for(unsigned int i = 0; i < rknn_io_num.n_output; i++)
+                for(unsigned int i = 0; i < rknn_io_num_od.n_output; i++)
                 {
                     output_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
+                    r = rknn_query(rknn_ctx_od, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
 
                     if(r != RKNN_SUCC)
                     {
@@ -371,41 +378,41 @@ int main()
         }
     }
 
-    // Preload hsunchi rknn model.
-    printf("Loading hsunchi model ...\n");
-    hsunchi_model = load_model(HSUNCHI_SSD_MODEL_PATH, &hsunchi_model_len);
-    hr = rknn_init(&hsunchi_rknn_ctx, hsunchi_model, hsunchi_model_len, 0);
+    // Preload ECD rknn model.
+    printf("Loading ECD model ...\n");
+    model_ecd = load_model(SSD_EC_MODEL_PATH, &model_ecd_len);
+    r = rknn_init(&rknn_ctx_ecd, model_ecd, model_ecd_len, 0);
     
-    if(hr < 0)
+    if(r < 0)
     {
         printf("rknn initialization failed! Returned %d.\n", r);
     }
     else
     {
         // Get Model Input Output Info
-        hr = rknn_query(hsunchi_rknn_ctx, RKNN_QUERY_IN_OUT_NUM, &hsunchi_rknn_io_num, sizeof(hsunchi_rknn_io_num));
+        r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_ecd, sizeof(rknn_io_num_ecd));
         
-        if(hr != RKNN_SUCC)
+        if(r != RKNN_SUCC)
         {
-            printf("rknn query failed! Return %d.\n", hr);
+            printf("rknn query failed! Return %d.\n", r);
         }
         else
         {
             printf("Model loaded successfully.\n");
-            printf("Model input num: %d, output num: %d\n", hsunchi_rknn_io_num.n_input, hsunchi_rknn_io_num.n_output);
+            printf("Model input num: %d, output num: %d\n", rknn_io_num_ecd.n_input, rknn_io_num_ecd.n_output);
 
             {
                 printf("Model input tensors:\n");
                 
-                rknn_tensor_attr input_attrs[hsunchi_rknn_io_num.n_input];
+                rknn_tensor_attr input_attrs[rknn_io_num_ecd.n_input];
                 memset(input_attrs, 0, sizeof(input_attrs));
                 
-                for(unsigned int i = 0; i < hsunchi_rknn_io_num.n_input; i++)
+                for(unsigned int i = 0; i < rknn_io_num_ecd.n_input; i++)
                 {
                     input_attrs[i].index = i;
-                    hr = rknn_query(hsunchi_rknn_ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+                    r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
                     
-                    if(hr != RKNN_SUCC)
+                    if(r != RKNN_SUCC)
                     {
                         printf("Failed to query rknn input tensor.\n");
                     }
@@ -419,15 +426,15 @@ int main()
             {
                 printf("Model output tensors:\n");
                 
-                rknn_tensor_attr output_attrs[hsunchi_rknn_io_num.n_output];
+                rknn_tensor_attr output_attrs[rknn_io_num_ecd.n_output];
                 memset(output_attrs, 0, sizeof(output_attrs));
                 
-                for(unsigned int i = 0; i < hsunchi_rknn_io_num.n_output; i++)
+                for(unsigned int i = 0; i < rknn_io_num_ecd.n_output; i++)
                 {
                     output_attrs[i].index = i;
-                    hr = rknn_query(hsunchi_rknn_ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
+                    r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
 
-                    if(hr != RKNN_SUCC)
+                    if(r != RKNN_SUCC)
                     {
                         printf("Failed to query rknn output tensor.\n");
                     }
@@ -444,6 +451,29 @@ int main()
     pthread_create(&detect_thread, NULL, detect_thread_handler, NULL);
     pthread_detach(detect_thread);
 
+    // Setup nano msg.
+    while(1)
+    {
+        if((sock = nn_socket(AF_SP, NN_PUB)) < 0)
+        {
+            printf("Data is NOT published due to socket error chkpt 1.\n");
+        }
+        else
+        {
+            if(nn_bind(sock, "tcp://192.168.1.5:5555") < 0)
+            {
+                printf("Data is NOT published due to socket error chkpt 2.\n");
+            }
+            else
+            {
+                printf("Nanomsg is ready!\n");
+                break;
+            }
+        }
+
+        ::sleep(1);
+    }
+
     while(1)
     {
         ::sleep(1);
@@ -454,23 +484,40 @@ int main()
     jmpp_raw_stream_close(CAMERA_ID, &raw_stream);
     printf("JMPP raw stream released.\n");
 
-    free(image_addr);
+    free(rga_image_buffer_addr);
+    free(rga_image_addr);
+    free(rga_image_cropped_addr);
+    free(mcd_image_addr);
+    free(ecd_image_addr);
     printf("Image buffer released.\n");
 
-    if(rknn_ctx)
+    if(rknn_ctx_od)
     {
-        rknn_destroy(rknn_ctx);
-        printf("rknn context released.\n");
+        rknn_destroy(rknn_ctx_od);
+        printf("od rknn context released.\n");
+    }
+
+    if(rknn_ctx_ecd)
+    {
+        rknn_destroy(rknn_ctx_ecd);
+        printf("ecd rknn context released.\n");
     }
     
-    if(model)
+    if(model_od)
     {
-        free(model);
-        printf("rknn model released.\n");
+        free(model_od);
+        printf("od rknn model released.\n");
+    }
+
+    if(model_ecd)
+    {
+        free(model_ecd);
+        printf("ecd rknn model released.\n");
     }
 
     return 0;
 }
+
 
 // Define function.
 
@@ -584,17 +631,17 @@ void rga_chn12_frame_cb(MEDIA_BUFFER mb)
     raw_stream_data_color_space = stImageInfo.enImgType;
 
     // Do image and image info copy.
-    image_size_hi = raw_stream_data_size;
-    image_timestamp = raw_stream_data_timestamp;
-    image_width = raw_stream_data_width;
-    image_height = raw_stream_data_height;
-    image_color_space = raw_stream_data_color_space;
-    memcpy(image_addr, raw_stream_data_addr, image_size_hi);
+    rga_image_size = raw_stream_data_size;
+    rga_image_timestamp = raw_stream_data_timestamp;
+    rga_image_width = raw_stream_data_width;
+    rga_image_height = raw_stream_data_height;
+    rga_image_color_space = raw_stream_data_color_space;
+    memcpy(rga_image_buffer_addr, raw_stream_data_addr, rga_image_size);
 
     // MUST release memory as soon as possible!
     RK_MPI_MB_ReleaseBuffer(mb);
 
-    ++image_id;
+    ++rga_image_id;
 }
 
 
@@ -828,374 +875,367 @@ static void *detect_thread_handler(void *arg)
 {
     while(1)
     {
-        if(image_id > image_id_prev)
+        if(rga_image_id > rga_image_prev_id)
         {
-            long timer_start = getCurrentTimeMsec();
-            int bbox_center_x = 0, bbox_center_y = 0;
-            int count_cars = 0;
-            int r = 0;
-            double e = 0;
-            struct json_object *HMW = NULL, *objectMark = NULL, *objectMark_enable = NULL;
-            
-            image_id_prev = image_id;
-            //printf("[%d] Detecting objects in image.\n", image_id_prev);
+            rga_image_prev_id = rga_image_id;
 
-            memcpy(image_drawing_addr, image_addr, image_size_hi);
-            crop_hFlip_image(image_drawing_addr, image_drawing_cropped_addr);
+            // Prevent from rga_chn12_frame_cb() overwrite.
+            memcpy(rga_image_addr, rga_image_buffer_addr, rga_image_size);
 
-            // Set input image.
-            rknn_input input[1];
-            memset(input, 0, sizeof(input));
-            input[0].index = 0;
-            input[0].type = RKNN_TENSOR_UINT8;
-            input[0].size = RGA_BUFFER_SCALED_SIZE;
-            input[0].fmt = RKNN_TENSOR_NHWC;
-            input[0].buf = image_drawing_cropped_addr;
+            // Crop image from 16:9 to 1:1 .
+            crop_hFlip_image(rga_image_addr, rga_image_cropped_addr);
 
-            // Draw boundary of car detect zone.
-            if(get_config_HMW_objectMark_enable())
+            // Copy image for applications: MCD & ECD.
+            memcpy(mcd_image_addr, rga_image_cropped_addr, RGA_BUFFER_SCALED_SIZE);
+            memcpy(ecd_image_addr, rga_image_addr, RGA_BUFFER_OUTPUT_SIZE);
+
+            // MCD.
             {
-                draw_border((char *)image_drawing_cropped_addr,
-                                MODEL_INPUT_SIZE,
-                                MODEL_INPUT_SIZE,
-                                MODEL_DETECT_BOUNDARY_LEFT,
-                                MODEL_DETECT_BOUNDARY_TOP,
-                                MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT,
-                                MODEL_DETECT_BOUNDARY_BOTTOM - MODEL_DETECT_BOUNDARY_TOP,
-                                COLOR_BLUE);
-            }
+                long timer_start = getCurrentTimeMsec();
+                int bbox_center_x = 0, bbox_center_y = 0;
+                int count_cars = 0;
+                int r = 0;
+                double e = 0;
+                struct json_object *HMW = NULL, *objectMark = NULL, *objectMark_enable = NULL;
 
-            r = rknn_inputs_set(rknn_ctx, rknn_io_num.n_input, input);
-            
-            if(r < 0)
-            {
-                printf("Failed to set rknn input! Returned %d.\n", r);
-            }
-            else
-            {
-                // Run rknn.
-                r = rknn_run(rknn_ctx, NULL);
+                // Set input image.
+                rknn_input input[1];
+                memset(input, 0, sizeof(input));
+                input[0].index = 0;
+                input[0].type = RKNN_TENSOR_UINT8;
+                input[0].size = RGA_BUFFER_SCALED_SIZE;
+                input[0].fmt = RKNN_TENSOR_NHWC;
+                input[0].buf = mcd_image_addr;
 
+                // Draw boundary of car detect zone.
+                if(get_config_HMW_objectMark_enable())
+                {
+                    draw_border((char *)mcd_image_addr,
+                                    MODEL_INPUT_SIZE,
+                                    MODEL_INPUT_SIZE,
+                                    MODEL_DETECT_BOUNDARY_LEFT,
+                                    MODEL_DETECT_BOUNDARY_TOP,
+                                    MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT,
+                                    MODEL_DETECT_BOUNDARY_BOTTOM - MODEL_DETECT_BOUNDARY_TOP,
+                                    COLOR_BLUE);
+                }
+
+                r = rknn_inputs_set(rknn_ctx_od, rknn_io_num_od.n_input, input);
+                
                 if(r < 0)
                 {
-                    printf("Failed to run rknn! Returned %d.\n", r);
+                    printf("[MCD] Failed to set rknn input! Returned %d.\n", r);
                 }
                 else
                 {
-                    // Get Output.
-                    rknn_output outputs[2];
-                    memset(outputs, 0, sizeof(outputs));
-                    outputs[0].want_float = 1;
-                    outputs[1].want_float = 1;
-                    r = rknn_outputs_get(rknn_ctx, rknn_io_num.n_output, outputs, NULL);
+                    // Run rknn.
+                    r = rknn_run(rknn_ctx_od, NULL);
 
                     if(r < 0)
                     {
-                        printf("Failed to get rknn output! Returned %d.\n", r);
+                        printf("[MCD] Failed to run rknn! Returned %d.\n", r);
                     }
                     else
                     {
-                        // Deal with output.
-                        detect_result_group_t detect_result_group;
-                        postProcessSSD((float*)(outputs[0].buf), (float*)(outputs[1].buf), MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, &detect_result_group);
-                        
-                        // Release rknn_outputs.
-                        rknn_outputs_release(rknn_ctx, 2, outputs);
+                        // Get Output.
+                        rknn_output outputs[2];
+                        memset(outputs, 0, sizeof(outputs));
+                        outputs[0].want_float = 1;
+                        outputs[1].want_float = 1;
+                        r = rknn_outputs_get(rknn_ctx_od, rknn_io_num_od.n_output, outputs, NULL);
 
-                        int pixel_distance = 0;
-	                    int min_pixel_distance = MODEL_INPUT_SIZE;
-                        double min_meter_distance = 0;
-                        int min_distance_boundary_top = 0, min_distance_boundary_bottom = 0, min_distance_boundary_left = 0, min_distance_boundary_right = 0;
-                        int sock = 0, sock_return = 0;
-                        NYCU_MHW_ALARM_EVENT_s ae;
-
-                        // Print detected objects.
-                        for(int i = 0; i < detect_result_group.count; i++)
+                        if(r < 0)
                         {
-                            detect_result_t *det_result = &(detect_result_group.results[i]);
-
-                            // Calculate center of the bbox.
-                            bbox_center_x = (det_result->box.left + det_result->box.right) / 2;
-                            bbox_center_y = (det_result->box.top + det_result->box.bottom) / 2;
-
-                            // It is a car &&
-                            // center of the bbox is located in detection zone &&
-                            // bbox width >= 60% detection zone size.
-                            if(strcmp("car", det_result->name) == 0 &&
-                                bbox_center_x >= MODEL_DETECT_BOUNDARY_LEFT &&
-                                bbox_center_x <= MODEL_DETECT_BOUNDARY_RIGHT &&
-                                bbox_center_y >= MODEL_DETECT_BOUNDARY_TOP &&
-                                bbox_center_y <= MODEL_DETECT_BOUNDARY_BOTTOM &&
-                                (det_result->box.right - det_result->box.left) >= (MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT) * 0.6)
-                            {
-                                ++count_cars;
-
-                                printf("%s @ (top=%d, right=%d, bottom=%d, left=%d) confidence=%f\n",
-                                    det_result->name,
-                                    det_result->box.top,
-                                    det_result->box.right,
-                                    det_result->box.bottom,
-                                    det_result->box.left,
-                                    det_result->prop);
-
-                                // Draw annotation on image.
-                                if(get_config_HMW_objectMark_enable())
-                                {
-                                    int x = det_result->box.left;
-                                    int y = det_result->box.top;
-                                    int w = det_result->box.right - det_result->box.left;
-                                    int h = det_result->box.bottom - det_result->box.top;
-
-                                    draw_border((char *)image_drawing_cropped_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_RED);
-                                }
-
-                                // Get min distance.
-                                pixel_distance = MODEL_INPUT_SIZE - det_result->box.bottom;
-
-                                if(pixel_distance < min_pixel_distance)
-                                {
-                                    min_pixel_distance = pixel_distance;
-
-                                    min_distance_boundary_top = det_result->box.top;
-                                    min_distance_boundary_bottom = det_result->box.bottom;
-                                    min_distance_boundary_left = det_result->box.left;
-                                    min_distance_boundary_right = det_result->box.right;
-
-                                    e = sqrt(pow(bbox_center_x - MODEL_INPUT_SIZE / 2.0, 2.0) + pow(bbox_center_y - MODEL_INPUT_SIZE / 2.0, 2.0));
-                                }
-                            }
-
-                            // It is a car.
-                            else if(strcmp("car", det_result->name) == 0)
-                            {
-                                // Draw annotation on image.
-                                if(get_config_HMW_objectMark_enable())
-                                {
-                                    int x = det_result->box.left;
-                                    int y = det_result->box.top;
-                                    int w = det_result->box.right - det_result->box.left;
-                                    int h = det_result->box.bottom - det_result->box.top;
-
-                                    draw_border((char *)image_drawing_cropped_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_GREEN);
-                                }
-                            }
-                        }
-
-                        // Print object detect result on terminal and truncate rknn list.
-                        if(count_cars)
-                        {
-                            printf("%d car(s) found in the boundary.\n", count_cars);
-
-                            // Save this detection result to linked list.
-                            rknn_list_push(rknn_list_all_, getCurrentTimeMsec(), detect_result_group);
-
-                            if(rknn_list_size(rknn_list_all_) >= MAX_RKNN_LIST_NUM)
-                            {
-                                rknn_list_drop(rknn_list_all_);
-                            }
-                        }
-
-
-                        // No min distance.
-                        if(min_pixel_distance >= MODEL_INPUT_SIZE)
-                        {
-                            min_pixel_distance = -1;
-                            min_meter_distance = -1;
-
-                            min_distance_boundary_top = -1;
-                            min_distance_boundary_bottom = -1;
-                            min_distance_boundary_left = -1;
-                            min_distance_boundary_right = -1;
-                        }
-
-                        // Calculate min distance from pixels to meters.
-                        else
-                        {
-                            min_meter_distance = sqrt(pow(e*VEHICLE_WIDTH_METER/(min_distance_boundary_right-min_distance_boundary_left), 2.0) + pow(MODEL_INPUT_SIZE*VEHICLE_WIDTH_METER/(2.0*(min_distance_boundary_right-min_distance_boundary_left)*TAN_OF_HHVIEW), 2.0));
-
-                            printf("Min Distance = %d pixels\n", min_pixel_distance);
-                            printf("               %.2lf meters\n", min_meter_distance);
-                            printf("               @ (top=%d, right=%d, bottom=%d, left=%d)\n", min_distance_boundary_top, min_distance_boundary_right, min_distance_boundary_bottom, min_distance_boundary_left);
-                        }
-
-
-                        // Put min distance value on image.
-                        if(get_config_HMW_objectMark_enable())
-                        {
-                            char min_meter_distance_str[100];
-                            sprintf(min_meter_distance_str, "%.2lf", min_meter_distance);
-
-                            put_text((char *)image_drawing_cropped_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 15, 15, min_meter_distance_str);
-                        }
-
-                        // Write annotated image to disk.
-                        if(get_config_HMW_recording_enable())
-                        {
-                            FILE* fout = nullptr;
-                            char filename[100] = "";
-                            char output_path[100] = "";
-
-                            strcat(output_path, get_config_HMW_recording_path());
-
-                            // Remove trailing slash.
-                            if(output_path[strlen(output_path) - 1] == '/')
-                            {
-                                output_path[strlen(output_path) - 1] = '\0';
-                            }
-
-                            sprintf(filename, "%s/%d.raw", output_path, image_id_prev);
-                            fout = fopen(filename, "wb");
-                            fwrite(image_drawing_cropped_addr, 1, RGA_BUFFER_SCALED_SIZE, fout);
-                            fclose(fout);
-                        }
-
-                        long timer_interval = getCurrentTimeMsec() - timer_start;
-                        printf("[%d] process takes %ld ms.\n", image_id_prev, timer_interval);
-                        
-                        
-                        // Publish by nanomsg.
-                        if((sock = nn_socket(AF_SP, NN_PUB)) < 0)
-                        {
-                            printf("Data is NOT published due to socket error chkpt 1.\n");
+                            printf("[MCD] Failed to get rknn output! Returned %d.\n", r);
                         }
                         else
                         {
-                            if(nn_bind(sock, "URL") < 0)
+                            // Deal with output.
+                            detect_result_group_t detect_result_group;
+                            postProcessSSD((float*)(outputs[0].buf), (float*)(outputs[1].buf), MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, &detect_result_group);
+                            
+                            // Release rknn_outputs.
+                            rknn_outputs_release(rknn_ctx_od, 2, outputs);
+
+                            int pixel_distance = 0;
+                            int min_pixel_distance = MODEL_INPUT_SIZE;
+                            double min_meter_distance = 0;
+                            int min_distance_boundary_top = 0, min_distance_boundary_bottom = 0, min_distance_boundary_left = 0, min_distance_boundary_right = 0;
+                            int sock_return = 0;
+                            NYCU_MHW_ALARM_EVENT_s ae;
+
+                            // Print detected objects.
+                            for(int i = 0; i < detect_result_group.count; i++)
                             {
-                                printf("Data is NOT published due to socket error chkpt 2.\n");
+                                detect_result_t *det_result = &(detect_result_group.results[i]);
+
+                                // Calculate center of the bbox.
+                                bbox_center_x = (det_result->box.left + det_result->box.right) / 2;
+                                bbox_center_y = (det_result->box.top + det_result->box.bottom) / 2;
+
+                                // It is a car &&
+                                // center of the bbox is located in detection zone &&
+                                // bbox width >= 60% detection zone size.
+                                if(strcmp("car", det_result->name) == 0 &&
+                                    bbox_center_x >= MODEL_DETECT_BOUNDARY_LEFT &&
+                                    bbox_center_x <= MODEL_DETECT_BOUNDARY_RIGHT &&
+                                    bbox_center_y >= MODEL_DETECT_BOUNDARY_TOP &&
+                                    bbox_center_y <= MODEL_DETECT_BOUNDARY_BOTTOM &&
+                                    (det_result->box.right - det_result->box.left) >= (MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT) * 0.6)
+                                {
+                                    ++count_cars;
+
+                                    printf("[MCD]  %s @ (top=%d, right=%d, bottom=%d, left=%d) confidence=%f\n",
+                                        det_result->name,
+                                        det_result->box.top,
+                                        det_result->box.right,
+                                        det_result->box.bottom,
+                                        det_result->box.left,
+                                        det_result->prop);
+
+                                    // Draw annotation on image.
+                                    if(get_config_HMW_objectMark_enable())
+                                    {
+                                        int x = det_result->box.left;
+                                        int y = det_result->box.top;
+                                        int w = det_result->box.right - det_result->box.left;
+                                        int h = det_result->box.bottom - det_result->box.top;
+
+                                        draw_border((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_RED);
+                                    }
+
+                                    // Get min distance.
+                                    pixel_distance = MODEL_INPUT_SIZE - det_result->box.bottom;
+
+                                    if(pixel_distance < min_pixel_distance)
+                                    {
+                                        min_pixel_distance = pixel_distance;
+
+                                        min_distance_boundary_top = det_result->box.top;
+                                        min_distance_boundary_bottom = det_result->box.bottom;
+                                        min_distance_boundary_left = det_result->box.left;
+                                        min_distance_boundary_right = det_result->box.right;
+
+                                        e = sqrt(pow(bbox_center_x - MODEL_INPUT_SIZE / 2.0, 2.0) + pow(bbox_center_y - MODEL_INPUT_SIZE / 2.0, 2.0));
+                                    }
+                                }
+
+                                // It is a car.
+                                else if(strcmp("car", det_result->name) == 0)
+                                {
+                                    // Draw annotation on image.
+                                    if(get_config_HMW_objectMark_enable())
+                                    {
+                                        int x = det_result->box.left;
+                                        int y = det_result->box.top;
+                                        int w = det_result->box.right - det_result->box.left;
+                                        int h = det_result->box.bottom - det_result->box.top;
+
+                                        draw_border((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_GREEN);
+                                    }
+                                }
+                            }
+
+                            // Print object detect result on terminal and truncate rknn list.
+                            if(count_cars)
+                            {
+                                printf("[MCD] %d car(s) found in the boundary.\n", count_cars);
+
+                                // Save this detection result to linked list.
+                                rknn_list_push(rknn_list_mcd, getCurrentTimeMsec(), detect_result_group);
+
+                                if(rknn_list_size(rknn_list_mcd) >= MAX_RKNN_LIST_NUM)
+                                {
+                                    rknn_list_drop(rknn_list_mcd);
+                                }
+                            }
+
+
+                            // No min distance.
+                            if(min_pixel_distance >= MODEL_INPUT_SIZE)
+                            {
+                                min_pixel_distance = -1;
+                                min_meter_distance = -1;
+
+                                min_distance_boundary_top = -1;
+                                min_distance_boundary_bottom = -1;
+                                min_distance_boundary_left = -1;
+                                min_distance_boundary_right = -1;
+                            }
+
+                            // Calculate min distance from pixels to meters.
+                            else
+                            {
+                                min_meter_distance = sqrt(pow(e*VEHICLE_WIDTH_METER/(min_distance_boundary_right-min_distance_boundary_left), 2.0) + pow(MODEL_INPUT_SIZE*VEHICLE_WIDTH_METER/(2.0*(min_distance_boundary_right-min_distance_boundary_left)*TAN_OF_HHVIEW), 2.0));
+
+                                printf("[MCD] Min Distance = %d pixels\n", min_pixel_distance);
+                                printf("                     %.2lf meters\n", min_meter_distance);
+                                printf("                     @ (top=%d, right=%d, bottom=%d, left=%d)\n", min_distance_boundary_top, min_distance_boundary_right, min_distance_boundary_bottom, min_distance_boundary_left);
+                            }
+
+
+                            // Put min distance value on image.
+                            if(get_config_HMW_objectMark_enable())
+                            {
+                                char min_meter_distance_str[100];
+                                sprintf(min_meter_distance_str, "%.2lf", min_meter_distance);
+
+                                put_text((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 15, 15, min_meter_distance_str);
+                            }
+
+                            // Write annotated image to disk.
+                            if(get_config_HMW_recording_enable())
+                            {
+                                FILE* fout = nullptr;
+                                char filename[100] = "";
+                                char output_path[100] = "";
+
+                                strcat(output_path, get_config_HMW_recording_path());
+
+                                // Remove trailing slash.
+                                if(output_path[strlen(output_path) - 1] == '/')
+                                {
+                                    output_path[strlen(output_path) - 1] = '\0';
+                                }
+
+                                sprintf(filename, "%s/%d.raw", output_path, rga_image_prev_id);
+                                fout = fopen(filename, "wb");
+                                fwrite(mcd_image_addr, 1, RGA_BUFFER_SCALED_SIZE, fout);
+                                fclose(fout);
+                            }
+
+                            long timer_interval = getCurrentTimeMsec() - timer_start;
+                            printf("[MCD][%d] process takes %ld ms.\n", rga_image_prev_id, timer_interval);
+                            
+                            
+                            // Publish by nanomsg.
+                            ae.frame_dimension.width = MODEL_INPUT_SIZE;
+                            ae.frame_dimension.height = MODEL_INPUT_SIZE;
+                            ae.front_vehicle_coord.top_x = min_distance_boundary_left;
+                            ae.front_vehicle_coord.top_x = min_distance_boundary_top;
+                            ae.front_vehicle_coord.bottom_x = min_distance_boundary_right;
+                            ae.front_vehicle_coord.bottom_y = min_distance_boundary_bottom;
+                            gettimeofday(&ae.timestamp, NULL);
+                            ae.front_vehicle_distance = (float)min_meter_distance;
+                            ae.car_speed = -1;
+                            
+                            sock_return = nn_send(sock, &ae, sizeof(ae), 0);
+                            
+                            if(sock_return < 0)
+                            {
+                                printf("Data is NOT published due to socket error chkpt 3.\n");
                             }
                             else
                             {
-                                ae.frame_dimension.width = MODEL_INPUT_SIZE;
-                                ae.frame_dimension.height = MODEL_INPUT_SIZE;
-                                ae.front_vehicle_coord.top_x = min_distance_boundary_left;
-                                ae.front_vehicle_coord.top_x = min_distance_boundary_top;
-                                ae.front_vehicle_coord.bottom_x = min_distance_boundary_right;
-                                ae.front_vehicle_coord.bottom_y = min_distance_boundary_bottom;
-                                gettimeofday(&ae.timestamp, NULL);
-                                ae.front_vehicle_distance = (float)min_meter_distance;
-                                ae.car_speed = -1;
-                                
-                                sock_return = nn_send(sock, &ae, sizeof(ae), 0);
-                                
-                                if(sock_return < 0)
-                                {
-                                    printf("Data is NOT published due to socket error chkpt 3.\n");
-                                }
-                                else
-                                {
-                                    printf("Data is published successfully.\n");
-                                }
+                                printf("Data is published successfully.\n");
                             }
                         }
                     }
                 }
             }
 
-            // hsunchi code.
-            const int MODEL_IN_WIDTH = 96;
-            const int MODEL_IN_HEIGHT = 96;
-            const int MODEL_IN_CHANNELS = 3;
-            
-            int raw_image_width = 532;
-            int raw_image_height = 300;
-
-            unsigned char *src_data = image_drawing_addr;
-
-            try
+            // ECD.
             {
+                const int MODEL_IN_WIDTH = 96;
+                const int MODEL_IN_HEIGHT = 96;
+                const int MODEL_IN_CHANNELS = 3;
+                long timer_start = getCurrentTimeMsec();
 
-                dlib::array2d<dlib::rgb_pixel> img(raw_image_height, raw_image_width);
-
-                for (int r = 0; r < raw_image_height; r++)
+                try
                 {
-                    for (int c = 0; c < raw_image_width; c++)
+                    dlib::array2d<dlib::rgb_pixel> img(RGA_OUTPUT_HEIGHT, RGA_OUTPUT_WIDTH);
+
+                    // Copy image to dlib object.
+                    for(int r = 0; r < RGA_OUTPUT_HEIGHT; r++)
                     {
-                        img[r][c] = dlib::rgb_pixel(src_data[r * raw_image_width * 3 + c * 3 + 0],
-                                                    src_data[r * raw_image_width * 3 + c * 3 + 1],
-                                                    src_data[r * raw_image_width * 3 + c * 3 + 2]);
-                    }
-                }
-
-                // save_png(img,"output.png");
-
-                frontal_face_detector detector = get_frontal_face_detector();
-                shape_predictor sp;
-                deserialize("./model/shape_predictor_5_face_landmarks.dat") >> sp;
-                printf("processing image \n");
-
-                std::vector<rectangle> dets = detector(img);
-                printf("Number of faces detected: %d\n", dets.size());
-
-                std::vector<full_object_detection> shapes;
-                for (unsigned long j = 0; j < dets.size(); ++j)
-                {
-                    full_object_detection shape = sp(img, dets[j]);
-                    cout << "number of parts: " << shape.num_parts() << endl;
-                    // rect (左, 上,右,下)
-                    // 右眼邊界 0-右 1-左
-                    int length = (shape.part(0).x() - shape.part(1).x()) / 2 + 5;
-                    rectangle rightrec(shape.part(1).x(), shape.part(1).y() - length, shape.part(0).x(), shape.part(0).y() + length);
-                    cv::Rect right_rec = dlibRectangleToOpenCV(rightrec);
-                    // 左眼邊界  2-右 3-左
-                    length = (shape.part(2).x() - shape.part(3).x()) / 2 + 5;
-                    rectangle leftrec(shape.part(3).x(), shape.part(3).y() - length, shape.part(2).x(), shape.part(2).y() + length);
-                    cv::Rect left_rec = dlibRectangleToOpenCV(leftrec);
-
-                    // 畫在原本讀近來的那張圖上
-                    // draw_rectangle(img, leftrec, dlib::rgb_pixel(255, 0, 0), 1);
-                    // draw_rectangle(img, rightrec, dlib::rgb_pixel(255, 0, 0), 1);
-                    cv::Mat org_img = dlib::toMat(img);
-                    cv::Mat right_eye = org_img(right_rec);
-                    cv::Mat left_eye = org_img(left_rec);
-                    // to 96X96
-                    cv::resize(right_eye, right_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
-                    cv::resize(left_eye, left_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
-
-                    if (!left_eye.data)
-                    {
-                        printf("No left eyes detect");
-                    }
-                    else
-                    {
-                        // rknn_input_output_num io_num = print_model_info(ctx);
-                        int res = predict_one_pic(left_eye, hsunchi_rknn_ctx, hsunchi_rknn_io_num);
-                        if (res == 1)
+                        for(int c = 0; c < RGA_OUTPUT_WIDTH; c++)
                         {
-                            cout << "Left eyes open" << endl;
+                            img[r][c] = dlib::rgb_pixel(ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 0],
+                                                        ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 1],
+                                                        ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 2]);
+                        }
+                    }
+
+                    frontal_face_detector detector = get_frontal_face_detector();
+                    shape_predictor sp;
+                    deserialize("model/shape_predictor_5_face_landmarks.dat") >> sp;
+
+                    std::vector<rectangle> dets = detector(img);
+                    printf("[ECD] Number of faces detected: %d\n", dets.size());
+
+                    std::vector<full_object_detection> shapes;
+                    for(unsigned long j = 0; j < dets.size(); ++j)
+                    {
+                        full_object_detection shape = sp(img, dets[j]);
+                        cout << "[ECD] Number of parts: " << shape.num_parts() << endl;
+
+                        // rect (左, 上, 右, 下)
+                        // 右眼邊界 0-右 1-左
+                        int length = (shape.part(0).x() - shape.part(1).x()) / 2 + 5;
+                        rectangle rightrec(shape.part(1).x(), shape.part(1).y() - length, shape.part(0).x(), shape.part(0).y() + length);
+                        cv::Rect right_rec = dlibRectangleToOpenCV(rightrec);
+
+                        // 左眼邊界  2-右 3-左
+                        length = (shape.part(2).x() - shape.part(3).x()) / 2 + 5;
+                        rectangle leftrec(shape.part(3).x(), shape.part(3).y() - length, shape.part(2).x(), shape.part(2).y() + length);
+                        cv::Rect left_rec = dlibRectangleToOpenCV(leftrec);
+
+                        // 畫在原本讀進來的那張圖上
+                        // draw_rectangle(img, leftrec, dlib::rgb_pixel(255, 0, 0), 1);
+                        // draw_rectangle(img, rightrec, dlib::rgb_pixel(255, 0, 0), 1);
+                        cv::Mat org_img = dlib::toMat(img);
+                        cv::Mat right_eye = org_img(right_rec);
+                        cv::Mat left_eye = org_img(left_rec);
+                        
+                        // To 96 x 96 pixels.
+                        cv::resize(right_eye, right_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
+                        cv::resize(left_eye, left_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
+
+                        if(!left_eye.data)
+                        {
+                            printf("[ECD] No left eyes detect.");
                         }
                         else
                         {
-                            cout << "Left eyes close" << endl;
+                            // rknn_input_output_num io_num = print_model_info(ctx);
+                            int res = predict_one_pic(left_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+                            if (res == 1)
+                            {
+                                cout << "[ECD] Left eyes open." << endl;
+                            }
+                            else
+                            {
+                                cout << "[ECD] Left eyes close." << endl;
+                            }
                         }
-                    }
 
-                    if (!right_eye.data)
-                    {
-                        printf("No right eyes detect");
-                    }
-                    else
-                    {
-                        // rknn_input_output_num io_num = print_model_info(ctx);
-                        int res = predict_one_pic(right_eye, hsunchi_rknn_ctx, hsunchi_rknn_io_num);
-                        if (res == 1)
+                        if (!right_eye.data)
                         {
-                            cout << "Right eyes open" << endl;
+                            printf("[ECD] No right eyes detect.");
                         }
                         else
                         {
-                            cout << "Right eyes close" << endl;
+                            // rknn_input_output_num io_num = print_model_info(ctx);
+                            int res = predict_one_pic(right_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+                            if (res == 1)
+                            {
+                                cout << "[ECD] Right eyes open." << endl;
+                            }
+                            else
+                            {
+                                cout << "[ECD] Right eyes close." << endl;
+                            }
                         }
                     }
+                    
+                    long timer_interval = getCurrentTimeMsec() - timer_start;
+                    printf("[ECD][%d] process takes %ld ms.\n", rga_image_prev_id, timer_interval);
                 }
-                
-                // cout << "Hit enter to process the next image..." << endl;
-                // cin.get();
-            }
-            catch (exception& e)
-            {
-                cout << "\nexception thrown!" << endl;
-                cout << e.what() << endl;
+                catch (exception& e)
+                {
+                    cout << "\n[ECD] Exception thrown!" << endl;
+                    cout << e.what() << endl;
+                }
             }
         }
 
