@@ -1,4 +1,18 @@
 
+/*
+ *  Important parameters in mild.json .
+ *
+ *  OD
+ *  Camera 0:
+ *      width: 544
+ *      height: 304
+ * 
+ *  ECD
+ *  Camera 1:
+ *      width: 640
+ *      height: 360
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -62,32 +76,48 @@ using namespace dlib;
 // For nanomsg.
 int sock = 0;
 
-const int CAMERA_ID = 0;
+const int DEBUG_IGNORE_NANOMSG_ERROR = 1;
+
+const int CAMERA_ID_OD = 0;
+const int CAMERA_ID_ECD = 1;
 
 // Check RGA hardware limitation at https://reurl.cc/y7n2W8 .
-const int MODEL_INPUT_WIDTH      = 300;                 // Set this to image size of model input.
-const int MODEL_INPUT_HEIGHT     = 300;                 // Set this to image size of model input.
-const int RGA_INPUT_WIDTH        = 544;                 // Copy the value from mild.json .
-const int RGA_INPUT_HEIGHT       = 304;                 // Copy the value from mild.json .
-const int RGA_OUTPUT_WIDTH       = 532;                 // Calculate from RGA_INPUT_* .
-const int RGA_OUTPUT_HEIGHT      = MODEL_INPUT_HEIGHT;  // Calculate from RGA_INPUT_* .
-const int RGA_OUTPUT_CROP_OFFSET = 116;                 // Crop left part and right part to make the image from 16:9 to 1:1 .
+const int OD_MODEL_INPUT_WIDTH      = 300;                   // Set this to image size of model input.
+const int OD_MODEL_INPUT_HEIGHT     = 300;                   // Set this to image size of model input.
+const int OD_RGA_INPUT_WIDTH        = 544;                   // Copy the value from mild.json .
+const int OD_RGA_INPUT_HEIGHT       = 304;                   // Copy the value from mild.json .
+const int OD_RGA_OUTPUT_WIDTH       = 532;                    // Calculate from RGA_INPUT_* .
+const int OD_RGA_OUTPUT_HEIGHT      = OD_MODEL_INPUT_HEIGHT;  // Calculate from RGA_INPUT_* .
+const int OD_RGA_OUTPUT_CROP_OFFSET = 116;                   // Crop left part and right part to make the image from 16:9 to 1:1 .
 
-const int RGA_BUFFER_INPUT_SIZE  = RGA_INPUT_WIDTH * RGA_INPUT_HEIGHT * 3;
-const int RGA_BUFFER_OUTPUT_SIZE = RGA_OUTPUT_WIDTH * RGA_OUTPUT_HEIGHT * 3;
-const int RGA_BUFFER_SCALED_SIZE = MODEL_INPUT_WIDTH * MODEL_INPUT_HEIGHT * 3;
+const int OD_RGA_BUFFER_INPUT_SIZE  = OD_RGA_INPUT_WIDTH * OD_RGA_INPUT_HEIGHT * 3;
+const int OD_RGA_BUFFER_OUTPUT_SIZE = OD_RGA_OUTPUT_WIDTH * OD_RGA_OUTPUT_HEIGHT * 3;
+const int OD_RGA_BUFFER_CROPPED_SIZE = OD_MODEL_INPUT_WIDTH * OD_MODEL_INPUT_HEIGHT * 3;
+
+
+const int ECD_MODEL_INPUT_WIDTH      = 640;                     // Set this to image size of model input.
+const int ECD_MODEL_INPUT_HEIGHT     = 360;                     // Set this to image size of model input.
+const int ECD_RGA_INPUT_WIDTH        = 640;                     // Copy the value from mild.json .
+const int ECD_RGA_INPUT_HEIGHT       = 360;                     // Copy the value from mild.json .
+const int ECD_RGA_OUTPUT_WIDTH       = ECD_MODEL_INPUT_WIDTH;   // Calculate from RGA_INPUT_* .
+const int ECD_RGA_OUTPUT_HEIGHT      = ECD_MODEL_INPUT_HEIGHT;  // Calculate from RGA_INPUT_* .
+
+const int ECD_RGA_BUFFER_INPUT_SIZE  = ECD_RGA_INPUT_WIDTH * ECD_RGA_INPUT_HEIGHT * 3;
+const int ECD_RGA_BUFFER_OUTPUT_SIZE = ECD_RGA_OUTPUT_WIDTH * ECD_RGA_OUTPUT_HEIGHT * 3;
+
+
 
 // Define safe zone in image.
-const int MODEL_DETECT_BOUNDARY_TOP    = 150;
-const int MODEL_DETECT_BOUNDARY_BOTTOM = 299;
-const int MODEL_DETECT_BOUNDARY_LEFT   = 100;
-const int MODEL_DETECT_BOUNDARY_RIGHT  = 199;
+const int MCD_MODEL_DETECT_BOUNDARY_TOP    = 150;
+const int MCD_MODEL_DETECT_BOUNDARY_BOTTOM = 299;
+const int MCD_MODEL_DETECT_BOUNDARY_LEFT   = 100;
+const int MCD_MODEL_DETECT_BOUNDARY_RIGHT  = 199;
 
 // Define object detection model path.
-const char* SSD_OD_MODEL_PATH = "model/ssd_inception_v2_rv1109_rv1126.rknn";
+const char* OD_MODEL_PATH = "model/ssd_inception_v2_rv1109_rv1126.rknn";
 
 // Define eye close detection model path.
-const char *SSD_EC_MODEL_PATH = "model/vgg16_eyeclose.rknn";
+const char* EC_MODEL_PATH = "model/vgg16_eyeclose.rknn";
 
 // For min car distance calculation.
 const double VEHICLE_WIDTH_METER = 1.75;
@@ -104,35 +134,58 @@ IMAGE_TYPE_E  npu_color_space;
 // Do not modify this data or read structure data directly.
 // Always use API to access information.
 // This may take a large memory. Declare as a global variable.
-JMPP_RAW_STREAM_S raw_stream;
+JMPP_RAW_STREAM_S raw_stream_od, raw_stream_ecd;
 
-int raw_stream_vi_chn;
-int raw_stream_vi_pipe;
+int raw_stream_vi_chn_od, raw_stream_vi_chn_ecd;
+int raw_stream_vi_pipe_od, raw_stream_vi_pipe_ecd;
 
-uint32_t     raw_stream_data_size        = 0;
-uint8_t*     raw_stream_data_addr        = 0;
-uint64_t     raw_stream_data_timestamp   = 0;
-uint32_t     raw_stream_data_width       = 0;
-uint32_t     raw_stream_data_height      = 0;
-IMAGE_TYPE_E raw_stream_data_color_space = IMAGE_TYPE_UNKNOW;
+// OD.
+uint32_t     od_raw_stream_data_size        = 0;
+uint8_t*     od_raw_stream_data_addr        = 0;
+uint64_t     od_raw_stream_data_timestamp   = 0;
+uint32_t     od_raw_stream_data_width       = 0;
+uint32_t     od_raw_stream_data_height      = 0;
+IMAGE_TYPE_E od_raw_stream_data_color_space = IMAGE_TYPE_UNKNOW;
 
-uint32_t     rga_image_size              = 0;
-uint64_t     rga_image_timestamp         = 0;
-uint32_t     rga_image_width             = 0;
-uint32_t     rga_image_height            = 0;
-IMAGE_TYPE_E rga_image_color_space       = IMAGE_TYPE_UNKNOW;
+uint32_t     od_rga_image_size              = 0;
+uint64_t     od_rga_image_timestamp         = 0;
+uint32_t     od_rga_image_width             = 0;
+uint32_t     od_rga_image_height            = 0;
+IMAGE_TYPE_E od_rga_image_color_space       = IMAGE_TYPE_UNKNOW;
 
 // These memory will be released at the end of main function.
-uint8_t*     rga_image_buffer_addr       = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);
-uint8_t*     rga_image_addr              = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);
-uint8_t*     rga_image_cropped_addr      = (uint8_t*)malloc(RGA_BUFFER_SCALED_SIZE);
-uint8_t*     mcd_image_addr              = (uint8_t*)malloc(RGA_BUFFER_SCALED_SIZE);  // For minimum car distance calculation.
-uint8_t*     ecd_image_addr              = (uint8_t*)malloc(RGA_BUFFER_OUTPUT_SIZE);  // For eye close detection.
+uint8_t*     od_rga_image_buffer_addr       = (uint8_t*)malloc(OD_RGA_BUFFER_OUTPUT_SIZE);
+uint8_t*     od_image_temp_addr             = (uint8_t*)malloc(OD_RGA_BUFFER_OUTPUT_SIZE);
+uint8_t*     od_image_addr                  = (uint8_t*)malloc(OD_RGA_BUFFER_CROPPED_SIZE);
 
-int rga_image_id = -1;
-int rga_image_prev_id = -1;
+int          od_rga_image_id = -1;
+int          od_rga_image_prev_id = -1;
 
 
+// ECD.
+uint32_t     ecd_raw_stream_data_size        = 0;
+uint8_t*     ecd_raw_stream_data_addr        = 0;
+uint64_t     ecd_raw_stream_data_timestamp   = 0;
+uint32_t     ecd_raw_stream_data_width       = 0;
+uint32_t     ecd_raw_stream_data_height      = 0;
+IMAGE_TYPE_E ecd_raw_stream_data_color_space = IMAGE_TYPE_UNKNOW;
+
+uint32_t     ecd_rga_image_size              = 0;
+uint64_t     ecd_rga_image_timestamp         = 0;
+uint32_t     ecd_rga_image_width             = 0;
+uint32_t     ecd_rga_image_height            = 0;
+IMAGE_TYPE_E ecd_rga_image_color_space       = IMAGE_TYPE_UNKNOW;
+
+// These memory will be released at the end of main function.
+uint8_t*     ecd_rga_image_buffer_addr       = (uint8_t*)malloc(ECD_RGA_BUFFER_OUTPUT_SIZE);
+uint8_t*     ecd_image_addr                  = (uint8_t*)malloc(ECD_RGA_BUFFER_OUTPUT_SIZE);
+
+int          ecd_rga_image_id = -1;
+int          ecd_rga_image_prev_id = -1;
+
+
+
+// Define max length of rknn list.
 const int MAX_RKNN_LIST_NUM = 5;
 
 
@@ -178,6 +231,7 @@ Color COLOR_BLUE;
 // Function declaration.
 static int npu_config_json_get();        // getting mpower configuration
 void rga_chn12_frame_cb(MEDIA_BUFFER mb);
+void rga_chn14_frame_cb(MEDIA_BUFFER mb);
 static void wait_jmpp_init_complete();
 static unsigned char *load_model(const char *, int *);
 void create_rknn_list(rknn_list **);
@@ -192,7 +246,8 @@ static cv::Rect dlibRectangleToOpenCV(dlib::rectangle);
 static void *detect_thread_handler(void *);
 void draw_border(char*, int, int, int, int, int, int, Color);
 void put_text(char*, int, int, int, int, char*);
-void crop_hFlip_image(uint8_t*, uint8_t*);
+void hFlip_image(uint8_t*, int, int);
+void hCrop_image(uint8_t*, uint8_t*, int, int, int, int);
 static long getCurrentTimeMsec();
 
 
@@ -218,15 +273,24 @@ int main()
     npu_config_json_get();  // Read mpower NPU configuration.
 
 
-    // open raw stream(224x224)
-    // raw stream is in NV16 color space.
+    // Open raw stream.
+    // Raw stream is in NV16 color space.
     // User has to call Rockchip native API to get frame data.
-    r = jmpp_raw_stream_open(CAMERA_ID, &raw_stream);
+    r = jmpp_raw_stream_open(CAMERA_ID_OD, &raw_stream_od);
 
     if(r != 0)
     {
-        printf("Can NOT open RAW stream.\n");
+        printf("[OD] Can NOT open RAW stream.\n");
     }
+
+
+    r = jmpp_raw_stream_open(CAMERA_ID_ECD, &raw_stream_ecd);
+
+    if(r != 0)
+    {
+        printf("[ECD] Can NOT open RAW stream.\n");
+    }
+
 
 
     // user can use vi_pipe and vi_chn to call rockchip API to get data.
@@ -235,17 +299,15 @@ int main()
     // 
     // There are different ways to get frame data, either using RK_MPI_SYS_GetMediaBuffer()
     // or RK_MPI_SYS_RegisterOutCb(). But application may have to create thread when calling them.
-    raw_stream_vi_pipe = jmpp_raw_stream_vi_pipe(CAMERA_ID, &raw_stream);
-    raw_stream_vi_chn = jmpp_raw_stream_vi_chn(CAMERA_ID, &raw_stream);
+    raw_stream_vi_pipe_od = jmpp_raw_stream_vi_pipe(CAMERA_ID_OD, &raw_stream_od);
+    raw_stream_vi_chn_od = jmpp_raw_stream_vi_chn(CAMERA_ID_OD, &raw_stream_od);
 
+    raw_stream_vi_pipe_ecd = jmpp_raw_stream_vi_pipe(CAMERA_ID_ECD, &raw_stream_ecd);
+    raw_stream_vi_chn_ecd = jmpp_raw_stream_vi_chn(CAMERA_ID_ECD, &raw_stream_ecd);
 
-    printf("RGA image input size is set to (%d, %d).\n", RGA_INPUT_WIDTH, RGA_INPUT_HEIGHT);
-    printf("RGA image output size is set to (%d, %d).\n", RGA_OUTPUT_WIDTH, RGA_OUTPUT_HEIGHT);
-
-
+    // OD.
     {
-        // RGA[12] color space conversation
-        // coverting color space
+        // RGA[12] color space conversation.
         
         RGA_ATTR_S stRgaAttr;
         stRgaAttr.bEnBufPool = RK_TRUE;
@@ -254,25 +316,25 @@ int main()
         stRgaAttr.stImgIn.u32X = 0;
         stRgaAttr.stImgIn.u32Y = 0;
         stRgaAttr.stImgIn.imgType = IMAGE_TYPE_NV16;  // MUST BE NV16.
-        stRgaAttr.stImgIn.u32Width = RGA_INPUT_WIDTH;
-        stRgaAttr.stImgIn.u32Height = RGA_INPUT_HEIGHT;
-        stRgaAttr.stImgIn.u32HorStride = RGA_INPUT_WIDTH;
-        stRgaAttr.stImgIn.u32VirStride = RGA_INPUT_HEIGHT;
+        stRgaAttr.stImgIn.u32Width = OD_RGA_INPUT_WIDTH;
+        stRgaAttr.stImgIn.u32Height = OD_RGA_INPUT_HEIGHT;
+        stRgaAttr.stImgIn.u32HorStride = OD_RGA_INPUT_WIDTH;
+        stRgaAttr.stImgIn.u32VirStride = OD_RGA_INPUT_HEIGHT;
         
         stRgaAttr.stImgOut.u32X = 0;
         stRgaAttr.stImgOut.u32Y = 0;
         stRgaAttr.stImgOut.imgType = IMAGE_TYPE_RGB888;
-        stRgaAttr.stImgOut.u32Width = RGA_OUTPUT_WIDTH;
-        stRgaAttr.stImgOut.u32Height = RGA_OUTPUT_HEIGHT;
-        stRgaAttr.stImgOut.u32HorStride = RGA_OUTPUT_WIDTH;
-        stRgaAttr.stImgOut.u32VirStride = RGA_OUTPUT_HEIGHT;
+        stRgaAttr.stImgOut.u32Width = OD_RGA_OUTPUT_WIDTH;
+        stRgaAttr.stImgOut.u32Height = OD_RGA_OUTPUT_HEIGHT;
+        stRgaAttr.stImgOut.u32HorStride = OD_RGA_OUTPUT_WIDTH;
+        stRgaAttr.stImgOut.u32VirStride = OD_RGA_OUTPUT_HEIGHT;
 
         // RGA channel 12 .. 15 can be used with rockchip native API
         r = RK_MPI_RGA_CreateChn(12, &stRgaAttr);
         
         if(r)
         {
-            printf("ERROR: Create rga[12] falied! ret=%d\n", r);
+            printf("[OD] ERROR: Create rga[12] falied! ret=%d\n", r);
         }
 
         // register a callback when there is a data on rga channel 12
@@ -285,17 +347,67 @@ int main()
 
         if(r)
         {
-            printf("ERROR: Register cb for RGA CB error! code:%d\n", r);
+            printf("[OD] ERROR: Register cb for RGA CB error! code:%d\n", r);
         }
     }
 
+    // ECD.
+    {
+        // RGA[14] color space conversation.
+        
+        RGA_ATTR_S stRgaAttr;
+        stRgaAttr.bEnBufPool = RK_TRUE;
+        stRgaAttr.u16BufPoolCnt = 2;  // Please do not set too many. 2 is default
+        stRgaAttr.u16Rotaion = 0;
+        stRgaAttr.stImgIn.u32X = 0;
+        stRgaAttr.stImgIn.u32Y = 0;
+        stRgaAttr.stImgIn.imgType = IMAGE_TYPE_NV16;  // MUST BE NV16.
+        stRgaAttr.stImgIn.u32Width = ECD_RGA_INPUT_WIDTH;
+        stRgaAttr.stImgIn.u32Height = ECD_RGA_INPUT_HEIGHT;
+        stRgaAttr.stImgIn.u32HorStride = ECD_RGA_INPUT_WIDTH;
+        stRgaAttr.stImgIn.u32VirStride = ECD_RGA_INPUT_HEIGHT;
+        
+        stRgaAttr.stImgOut.u32X = 0;
+        stRgaAttr.stImgOut.u32Y = 0;
+        stRgaAttr.stImgOut.imgType = IMAGE_TYPE_RGB888;
+        stRgaAttr.stImgOut.u32Width = ECD_RGA_OUTPUT_WIDTH;
+        stRgaAttr.stImgOut.u32Height = ECD_RGA_OUTPUT_HEIGHT;
+        stRgaAttr.stImgOut.u32HorStride = ECD_RGA_OUTPUT_WIDTH;
+        stRgaAttr.stImgOut.u32VirStride = ECD_RGA_OUTPUT_HEIGHT;
+
+        // RGA channel 12 .. 15 can be used with rockchip native API
+        r = RK_MPI_RGA_CreateChn(14, &stRgaAttr);
+        
+        if(r)
+        {
+            printf("[ECD] ERROR: Create rga[14] falied! ret=%d\n", r);
+        }
+
+        // register a callback when there is a data on rga channel 14
+        MPP_CHN_S stEncChn;
+
+        stEncChn.enModId = RK_ID_RGA;
+        stEncChn.s32ChnId = 14;
+        
+        r = RK_MPI_SYS_RegisterOutCb(&stEncChn, rga_chn14_frame_cb);
+
+        if(r)
+        {
+            printf("[ECD] ERROR: Register cb for RGA CB error! code:%d\n", r);
+        }
+    }
+
+
+
     // starting the VI -> RGA[12], VI -> RGA[13] pipeline data.
     // VI automatically starts capturing data after binding is completed.
+
+    // OD.
     {
         MPP_CHN_S stSrcChn;
         stSrcChn.enModId = RK_ID_VI;
-        stSrcChn.s32DevId = raw_stream_vi_pipe;
-        stSrcChn.s32ChnId = raw_stream_vi_chn;
+        stSrcChn.s32DevId = raw_stream_vi_pipe_od;
+        stSrcChn.s32ChnId = raw_stream_vi_chn_od;
         MPP_CHN_S stDestChn;
         stDestChn.enModId = RK_ID_RGA;
         stDestChn.s32DevId = 0;
@@ -305,13 +417,34 @@ int main()
         
         if(r)
         {
-            printf("ERROR: Bind vi[%d:%d] and rga[12] failed! ret=%d\n", raw_stream_vi_pipe, raw_stream_vi_chn, r);
+            printf("[OD] ERROR: Bind vi[%d:%d] and rga[12] failed! ret=%d\n", raw_stream_vi_pipe_od, raw_stream_vi_chn_od, r);
         }
     }
 
+    // ECD.
+    {
+        MPP_CHN_S stSrcChn;
+        stSrcChn.enModId = RK_ID_VI;
+        stSrcChn.s32DevId = raw_stream_vi_pipe_ecd;
+        stSrcChn.s32ChnId = raw_stream_vi_chn_ecd;
+        MPP_CHN_S stDestChn;
+        stDestChn.enModId = RK_ID_RGA;
+        stDestChn.s32DevId = 0;
+        stDestChn.s32ChnId = 14;
+        
+        r = RK_MPI_SYS_Bind(&stSrcChn, &stDestChn);
+        
+        if(r)
+        {
+            printf("[ECD] ERROR: Bind vi[%d:%d] and rga[14] failed! ret=%d\n", raw_stream_vi_pipe_od, raw_stream_vi_chn_od, r);
+        }
+    }
+
+
+
     // Preload OD rknn model.
     printf("Loading OD model ...\n");
-    model_od = load_model(SSD_OD_MODEL_PATH, &model_od_len);
+    model_od = load_model(OD_MODEL_PATH, &model_od_len);
     r = rknn_init(&rknn_ctx_od, model_od, model_od_len, 0);
     
     if(r < 0)
@@ -380,7 +513,7 @@ int main()
 
     // Preload ECD rknn model.
     printf("Loading ECD model ...\n");
-    model_ecd = load_model(SSD_EC_MODEL_PATH, &model_ecd_len);
+    model_ecd = load_model(EC_MODEL_PATH, &model_ecd_len);
     r = rknn_init(&rknn_ctx_ecd, model_ecd, model_ecd_len, 0);
     
     if(r < 0)
@@ -447,22 +580,25 @@ int main()
         }
     }
 
-    pthread_t detect_thread;
-    pthread_create(&detect_thread, NULL, detect_thread_handler, NULL);
-    pthread_detach(detect_thread);
-
     // Setup nano msg.
     while(1)
     {
         if((sock = nn_socket(AF_SP, NN_PUB)) < 0)
         {
-            printf("Data is NOT published due to socket error chkpt 1.\n");
+            printf("Nanomsg is NOT ready due to socket error chkpt 1.\n");
         }
         else
         {
             if(nn_bind(sock, "tcp://192.168.1.5:5555") < 0)
             {
-                printf("Data is NOT published due to socket error chkpt 2.\n");
+                printf("Nanomsg is NOT ready due to socket error chkpt 2.\n");
+
+                // For easy debug only.
+                if(DEBUG_IGNORE_NANOMSG_ERROR)
+                {
+                    printf("Nanomsg is NOT ready but the program will still keep running.\n");
+                    break;
+                }
             }
             else
             {
@@ -474,20 +610,29 @@ int main()
         ::sleep(1);
     }
 
+    printf("Binding detect_thread_handler() ......\n");
+    pthread_t detect_thread;
+    pthread_create(&detect_thread, NULL, detect_thread_handler, NULL);
+    pthread_detach(detect_thread);
+
     while(1)
     {
         ::sleep(1);
     }
 
     // Release resources.
-    jmpp_raw_stream_stop(CAMERA_ID, &raw_stream);
-    jmpp_raw_stream_close(CAMERA_ID, &raw_stream);
-    printf("JMPP raw stream released.\n");
+    jmpp_raw_stream_stop(CAMERA_ID_OD, &raw_stream_od);
+    jmpp_raw_stream_close(CAMERA_ID_OD, &raw_stream_od);
+    printf("[OD] JMPP raw stream released.\n");
 
-    free(rga_image_buffer_addr);
-    free(rga_image_addr);
-    free(rga_image_cropped_addr);
-    free(mcd_image_addr);
+    jmpp_raw_stream_stop(CAMERA_ID_ECD, &raw_stream_ecd);
+    jmpp_raw_stream_close(CAMERA_ID_ECD, &raw_stream_ecd);
+    printf("[ECD] JMPP raw stream released.\n");
+
+    free(od_rga_image_buffer_addr);
+    free(od_image_temp_addr);
+    free(od_image_addr);
+    free(ecd_rga_image_buffer_addr);
     free(ecd_image_addr);
     printf("Image buffer released.\n");
 
@@ -611,37 +756,82 @@ void rga_chn12_frame_cb(MEDIA_BUFFER mb)
     memset(&stImageInfo, 0, sizeof(stImageInfo));
     chn = RK_MPI_MB_GetChannelID(mb);
 
-    if(chn != 12)   // depending on the setup
+    if(chn != 12)   // Depending on the setup.
     {
-        printf("RGA channel invalid\n");
+        printf("[OD] RGA channel invalid\n");
     }
 
     r = RK_MPI_MB_GetImageInfo(mb, &stImageInfo);
 
     if(r)
     {
-        printf("Warn: Get image info failed! r = %d\n", r);
+        printf("[OD] Warn: Get image info failed! r = %d\n", r);
     }
     
-    raw_stream_data_addr = (uint8_t  *) RK_MPI_MB_GetPtr(mb);
-    raw_stream_data_size = RK_MPI_MB_GetSize(mb);
-    raw_stream_data_timestamp = RK_MPI_MB_GetTimestamp(mb);
-    raw_stream_data_width = stImageInfo.u32Width;
-    raw_stream_data_height = stImageInfo.u32Height;
-    raw_stream_data_color_space = stImageInfo.enImgType;
+    od_raw_stream_data_addr = (uint8_t  *) RK_MPI_MB_GetPtr(mb);
+    od_raw_stream_data_size = RK_MPI_MB_GetSize(mb);
+    od_raw_stream_data_timestamp = RK_MPI_MB_GetTimestamp(mb);
+    od_raw_stream_data_width = stImageInfo.u32Width;
+    od_raw_stream_data_height = stImageInfo.u32Height;
+    od_raw_stream_data_color_space = stImageInfo.enImgType;
 
     // Do image and image info copy.
-    rga_image_size = raw_stream_data_size;
-    rga_image_timestamp = raw_stream_data_timestamp;
-    rga_image_width = raw_stream_data_width;
-    rga_image_height = raw_stream_data_height;
-    rga_image_color_space = raw_stream_data_color_space;
-    memcpy(rga_image_buffer_addr, raw_stream_data_addr, rga_image_size);
+    od_rga_image_size = od_raw_stream_data_size;
+    od_rga_image_timestamp = od_raw_stream_data_timestamp;
+    od_rga_image_width = od_raw_stream_data_width;
+    od_rga_image_height = od_raw_stream_data_height;
+    od_rga_image_color_space = od_raw_stream_data_color_space;
+    memcpy(od_rga_image_buffer_addr, od_raw_stream_data_addr, od_rga_image_size);
 
     // MUST release memory as soon as possible!
     RK_MPI_MB_ReleaseBuffer(mb);
 
-    ++rga_image_id;
+    ++od_rga_image_id;
+    //printf("[OD][%d] New image generated.\n", od_rga_image_id);
+}
+
+
+void rga_chn14_frame_cb(MEDIA_BUFFER mb)
+{
+    int chn;
+    int r;
+    MB_IMAGE_INFO_S stImageInfo;
+
+    memset(&stImageInfo, 0, sizeof(stImageInfo));
+    chn = RK_MPI_MB_GetChannelID(mb);
+
+    if(chn != 14)   // Depending on the setup.
+    {
+        printf("[ECD] RGA channel invalid\n");
+    }
+
+    r = RK_MPI_MB_GetImageInfo(mb, &stImageInfo);
+
+    if(r)
+    {
+        printf("[ECD] Warn: Get image info failed! r = %d\n", r);
+    }
+    
+    ecd_raw_stream_data_addr = (uint8_t  *) RK_MPI_MB_GetPtr(mb);
+    ecd_raw_stream_data_size = RK_MPI_MB_GetSize(mb);
+    ecd_raw_stream_data_timestamp = RK_MPI_MB_GetTimestamp(mb);
+    ecd_raw_stream_data_width = stImageInfo.u32Width;
+    ecd_raw_stream_data_height = stImageInfo.u32Height;
+    ecd_raw_stream_data_color_space = stImageInfo.enImgType;
+
+    // Do image and image info copy.
+    ecd_rga_image_size = ecd_raw_stream_data_size;
+    ecd_rga_image_timestamp = ecd_raw_stream_data_timestamp;
+    ecd_rga_image_width = ecd_raw_stream_data_width;
+    ecd_rga_image_height = ecd_raw_stream_data_height;
+    ecd_rga_image_color_space = ecd_raw_stream_data_color_space;
+    memcpy(ecd_rga_image_buffer_addr, ecd_raw_stream_data_addr, ecd_rga_image_size);
+
+    // MUST release memory as soon as possible!
+    RK_MPI_MB_ReleaseBuffer(mb);
+
+    ++ecd_rga_image_id;
+    //printf("[ECD][%d] New image generated.\n", ecd_rga_image_id);
 }
 
 
@@ -875,19 +1065,18 @@ static void *detect_thread_handler(void *arg)
 {
     while(1)
     {
-        if(rga_image_id > rga_image_prev_id)
+        if(od_rga_image_id > od_rga_image_prev_id)
         {
-            rga_image_prev_id = rga_image_id;
+            od_rga_image_prev_id = od_rga_image_id;
 
             // Prevent from rga_chn12_frame_cb() overwrite.
-            memcpy(rga_image_addr, rga_image_buffer_addr, rga_image_size);
+            memcpy(od_image_temp_addr, od_rga_image_buffer_addr, od_rga_image_size);
+
+            // Flip image horizontally.
+            hFlip_image(od_image_temp_addr, OD_RGA_OUTPUT_WIDTH, OD_RGA_OUTPUT_HEIGHT);
 
             // Crop image from 16:9 to 1:1 .
-            crop_hFlip_image(rga_image_addr, rga_image_cropped_addr);
-
-            // Copy image for applications: MCD & ECD.
-            memcpy(mcd_image_addr, rga_image_cropped_addr, RGA_BUFFER_SCALED_SIZE);
-            memcpy(ecd_image_addr, rga_image_addr, RGA_BUFFER_OUTPUT_SIZE);
+            hCrop_image(od_image_temp_addr, od_image_addr, OD_RGA_OUTPUT_WIDTH, OD_MODEL_INPUT_WIDTH, OD_MODEL_INPUT_HEIGHT, OD_RGA_OUTPUT_CROP_OFFSET);
 
             // MCD.
             {
@@ -903,20 +1092,20 @@ static void *detect_thread_handler(void *arg)
                 memset(input, 0, sizeof(input));
                 input[0].index = 0;
                 input[0].type = RKNN_TENSOR_UINT8;
-                input[0].size = RGA_BUFFER_SCALED_SIZE;
+                input[0].size = OD_RGA_BUFFER_CROPPED_SIZE;
                 input[0].fmt = RKNN_TENSOR_NHWC;
-                input[0].buf = mcd_image_addr;
+                input[0].buf = od_image_addr;
 
                 // Draw boundary of car detect zone.
                 if(get_config_HMW_objectMark_enable())
                 {
-                    draw_border((char *)mcd_image_addr,
-                                    MODEL_INPUT_SIZE,
-                                    MODEL_INPUT_SIZE,
-                                    MODEL_DETECT_BOUNDARY_LEFT,
-                                    MODEL_DETECT_BOUNDARY_TOP,
-                                    MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT,
-                                    MODEL_DETECT_BOUNDARY_BOTTOM - MODEL_DETECT_BOUNDARY_TOP,
+                    draw_border((char *)od_image_addr,
+                                    OD_MODEL_INPUT_WIDTH,
+                                    OD_MODEL_INPUT_HEIGHT,
+                                    MCD_MODEL_DETECT_BOUNDARY_LEFT,
+                                    MCD_MODEL_DETECT_BOUNDARY_TOP,
+                                    MCD_MODEL_DETECT_BOUNDARY_RIGHT - MCD_MODEL_DETECT_BOUNDARY_LEFT,
+                                    MCD_MODEL_DETECT_BOUNDARY_BOTTOM - MCD_MODEL_DETECT_BOUNDARY_TOP,
                                     COLOR_BLUE);
                 }
 
@@ -952,13 +1141,13 @@ static void *detect_thread_handler(void *arg)
                         {
                             // Deal with output.
                             detect_result_group_t detect_result_group;
-                            postProcessSSD((float*)(outputs[0].buf), (float*)(outputs[1].buf), MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, &detect_result_group);
+                            postProcessSSD((float*)(outputs[0].buf), (float*)(outputs[1].buf), OD_MODEL_INPUT_WIDTH, OD_MODEL_INPUT_HEIGHT, &detect_result_group);
                             
                             // Release rknn_outputs.
                             rknn_outputs_release(rknn_ctx_od, 2, outputs);
 
                             int pixel_distance = 0;
-                            int min_pixel_distance = MODEL_INPUT_SIZE;
+                            int min_pixel_distance = OD_MODEL_INPUT_HEIGHT;
                             double min_meter_distance = 0;
                             int min_distance_boundary_top = 0, min_distance_boundary_bottom = 0, min_distance_boundary_left = 0, min_distance_boundary_right = 0;
                             int sock_return = 0;
@@ -977,11 +1166,11 @@ static void *detect_thread_handler(void *arg)
                                 // center of the bbox is located in detection zone &&
                                 // bbox width >= 60% detection zone size.
                                 if(strcmp("car", det_result->name) == 0 &&
-                                    bbox_center_x >= MODEL_DETECT_BOUNDARY_LEFT &&
-                                    bbox_center_x <= MODEL_DETECT_BOUNDARY_RIGHT &&
-                                    bbox_center_y >= MODEL_DETECT_BOUNDARY_TOP &&
-                                    bbox_center_y <= MODEL_DETECT_BOUNDARY_BOTTOM &&
-                                    (det_result->box.right - det_result->box.left) >= (MODEL_DETECT_BOUNDARY_RIGHT - MODEL_DETECT_BOUNDARY_LEFT) * 0.6)
+                                    bbox_center_x >= MCD_MODEL_DETECT_BOUNDARY_LEFT &&
+                                    bbox_center_x <= MCD_MODEL_DETECT_BOUNDARY_RIGHT &&
+                                    bbox_center_y >= MCD_MODEL_DETECT_BOUNDARY_TOP &&
+                                    bbox_center_y <= MCD_MODEL_DETECT_BOUNDARY_BOTTOM &&
+                                    (det_result->box.right - det_result->box.left) >= (MCD_MODEL_DETECT_BOUNDARY_RIGHT - MCD_MODEL_DETECT_BOUNDARY_LEFT) * 0.6)
                                 {
                                     ++count_cars;
 
@@ -1001,11 +1190,11 @@ static void *detect_thread_handler(void *arg)
                                         int w = det_result->box.right - det_result->box.left;
                                         int h = det_result->box.bottom - det_result->box.top;
 
-                                        draw_border((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_RED);
+                                        draw_border((char *)od_image_addr, OD_MODEL_INPUT_WIDTH, OD_MODEL_INPUT_HEIGHT, x, y, w, h, COLOR_RED);
                                     }
 
                                     // Get min distance.
-                                    pixel_distance = MODEL_INPUT_SIZE - det_result->box.bottom;
+                                    pixel_distance = OD_MODEL_INPUT_HEIGHT - det_result->box.bottom;
 
                                     if(pixel_distance < min_pixel_distance)
                                     {
@@ -1016,7 +1205,7 @@ static void *detect_thread_handler(void *arg)
                                         min_distance_boundary_left = det_result->box.left;
                                         min_distance_boundary_right = det_result->box.right;
 
-                                        e = sqrt(pow(bbox_center_x - MODEL_INPUT_SIZE / 2.0, 2.0) + pow(bbox_center_y - MODEL_INPUT_SIZE / 2.0, 2.0));
+                                        e = sqrt(pow(bbox_center_x - OD_MODEL_INPUT_WIDTH / 2.0, 2.0) + pow(bbox_center_y - OD_MODEL_INPUT_HEIGHT / 2.0, 2.0));
                                     }
                                 }
 
@@ -1031,7 +1220,7 @@ static void *detect_thread_handler(void *arg)
                                         int w = det_result->box.right - det_result->box.left;
                                         int h = det_result->box.bottom - det_result->box.top;
 
-                                        draw_border((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, x, y, w, h, COLOR_GREEN);
+                                        draw_border((char *)od_image_addr, OD_MODEL_INPUT_WIDTH, OD_MODEL_INPUT_HEIGHT, x, y, w, h, COLOR_GREEN);
                                     }
                                 }
                             }
@@ -1052,7 +1241,7 @@ static void *detect_thread_handler(void *arg)
 
 
                             // No min distance.
-                            if(min_pixel_distance >= MODEL_INPUT_SIZE)
+                            if(min_pixel_distance >= OD_MODEL_INPUT_HEIGHT)
                             {
                                 min_pixel_distance = -1;
                                 min_meter_distance = -1;
@@ -1066,7 +1255,7 @@ static void *detect_thread_handler(void *arg)
                             // Calculate min distance from pixels to meters.
                             else
                             {
-                                min_meter_distance = sqrt(pow(e*VEHICLE_WIDTH_METER/(min_distance_boundary_right-min_distance_boundary_left), 2.0) + pow(MODEL_INPUT_SIZE*VEHICLE_WIDTH_METER/(2.0*(min_distance_boundary_right-min_distance_boundary_left)*TAN_OF_HHVIEW), 2.0));
+                                min_meter_distance = sqrt(pow(e*VEHICLE_WIDTH_METER/(min_distance_boundary_right-min_distance_boundary_left), 2.0) + pow(OD_MODEL_INPUT_WIDTH*VEHICLE_WIDTH_METER/(2.0*(min_distance_boundary_right-min_distance_boundary_left)*TAN_OF_HHVIEW), 2.0));
 
                                 printf("[MCD] Min Distance = %d pixels\n", min_pixel_distance);
                                 printf("                     %.2lf meters\n", min_meter_distance);
@@ -1080,7 +1269,7 @@ static void *detect_thread_handler(void *arg)
                                 char min_meter_distance_str[100];
                                 sprintf(min_meter_distance_str, "%.2lf", min_meter_distance);
 
-                                put_text((char *)mcd_image_addr, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, 15, 15, min_meter_distance_str);
+                                put_text((char *)od_image_addr, OD_MODEL_INPUT_WIDTH, OD_MODEL_INPUT_HEIGHT, 15, 15, min_meter_distance_str);
                             }
 
                             // Write annotated image to disk.
@@ -1098,19 +1287,19 @@ static void *detect_thread_handler(void *arg)
                                     output_path[strlen(output_path) - 1] = '\0';
                                 }
 
-                                sprintf(filename, "%s/%d.raw", output_path, rga_image_prev_id);
+                                sprintf(filename, "%s/MCD_%d.raw", output_path, od_rga_image_prev_id);
                                 fout = fopen(filename, "wb");
-                                fwrite(mcd_image_addr, 1, RGA_BUFFER_SCALED_SIZE, fout);
+                                fwrite(od_image_addr, 1, OD_RGA_BUFFER_CROPPED_SIZE, fout);
                                 fclose(fout);
                             }
 
                             long timer_interval = getCurrentTimeMsec() - timer_start;
-                            printf("[MCD][%d] process takes %ld ms.\n", rga_image_prev_id, timer_interval);
+                            printf("[MCD][%d] process takes %ld ms.\n", od_rga_image_prev_id, timer_interval);
                             
                             
                             // Publish by nanomsg.
-                            ae.frame_dimension.width = MODEL_INPUT_SIZE;
-                            ae.frame_dimension.height = MODEL_INPUT_SIZE;
+                            ae.frame_dimension.width = OD_MODEL_INPUT_WIDTH;
+                            ae.frame_dimension.height = OD_MODEL_INPUT_HEIGHT;
                             ae.front_vehicle_coord.top_x = min_distance_boundary_left;
                             ae.front_vehicle_coord.top_x = min_distance_boundary_top;
                             ae.front_vehicle_coord.bottom_x = min_distance_boundary_right;
@@ -1133,108 +1322,93 @@ static void *detect_thread_handler(void *arg)
                     }
                 }
             }
+        }
+
+        if(ecd_rga_image_id > ecd_rga_image_prev_id)
+        {
+            ecd_rga_image_prev_id = ecd_rga_image_id;
+
+            // Prevent from rga_chn14_frame_cb() overwrite.
+            memcpy(ecd_image_addr, ecd_rga_image_buffer_addr, ecd_rga_image_size);
+
+            // Flip image horizontally.
+            hFlip_image(ecd_image_addr, ECD_RGA_OUTPUT_WIDTH, ECD_RGA_OUTPUT_HEIGHT);
 
             // ECD.
             {
-                const int MODEL_IN_WIDTH = 96;
-                const int MODEL_IN_HEIGHT = 96;
-                const int MODEL_IN_CHANNELS = 3;
                 long timer_start = getCurrentTimeMsec();
+                int r = 0;
+                struct json_object *HMW = NULL, *objectMark = NULL, *objectMark_enable = NULL;
 
-                try
+                // Set input image.
+                rknn_input input[1];
+                memset(input, 0, sizeof(input));
+                input[0].index = 0;
+                input[0].type = RKNN_TENSOR_UINT8;
+                input[0].size = ECD_RGA_BUFFER_OUTPUT_SIZE;
+                input[0].fmt = RKNN_TENSOR_NHWC;
+                input[0].buf = ecd_image_addr;
+
+                r = rknn_inputs_set(rknn_ctx_ecd, rknn_io_num_ecd.n_input, input);
+                
+                if(r < 0)
                 {
-                    dlib::array2d<dlib::rgb_pixel> img(RGA_OUTPUT_HEIGHT, RGA_OUTPUT_WIDTH);
-
-                    // Copy image to dlib object.
-                    for(int r = 0; r < RGA_OUTPUT_HEIGHT; r++)
-                    {
-                        for(int c = 0; c < RGA_OUTPUT_WIDTH; c++)
-                        {
-                            img[r][c] = dlib::rgb_pixel(ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 0],
-                                                        ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 1],
-                                                        ecd_image_addr[r * RGA_OUTPUT_WIDTH * 3 + c * 3 + 2]);
-                        }
-                    }
-
-                    frontal_face_detector detector = get_frontal_face_detector();
-                    shape_predictor sp;
-                    deserialize("model/shape_predictor_5_face_landmarks.dat") >> sp;
-
-                    std::vector<rectangle> dets = detector(img);
-                    printf("[ECD] Number of faces detected: %d\n", dets.size());
-
-                    std::vector<full_object_detection> shapes;
-                    for(unsigned long j = 0; j < dets.size(); ++j)
-                    {
-                        full_object_detection shape = sp(img, dets[j]);
-                        cout << "[ECD] Number of parts: " << shape.num_parts() << endl;
-
-                        // rect (左, 上, 右, 下)
-                        // 右眼邊界 0-右 1-左
-                        int length = (shape.part(0).x() - shape.part(1).x()) / 2 + 5;
-                        rectangle rightrec(shape.part(1).x(), shape.part(1).y() - length, shape.part(0).x(), shape.part(0).y() + length);
-                        cv::Rect right_rec = dlibRectangleToOpenCV(rightrec);
-
-                        // 左眼邊界  2-右 3-左
-                        length = (shape.part(2).x() - shape.part(3).x()) / 2 + 5;
-                        rectangle leftrec(shape.part(3).x(), shape.part(3).y() - length, shape.part(2).x(), shape.part(2).y() + length);
-                        cv::Rect left_rec = dlibRectangleToOpenCV(leftrec);
-
-                        // 畫在原本讀進來的那張圖上
-                        // draw_rectangle(img, leftrec, dlib::rgb_pixel(255, 0, 0), 1);
-                        // draw_rectangle(img, rightrec, dlib::rgb_pixel(255, 0, 0), 1);
-                        cv::Mat org_img = dlib::toMat(img);
-                        cv::Mat right_eye = org_img(right_rec);
-                        cv::Mat left_eye = org_img(left_rec);
-                        
-                        // To 96 x 96 pixels.
-                        cv::resize(right_eye, right_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
-                        cv::resize(left_eye, left_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
-
-                        if(!left_eye.data)
-                        {
-                            printf("[ECD] No left eyes detect.");
-                        }
-                        else
-                        {
-                            // rknn_input_output_num io_num = print_model_info(ctx);
-                            int res = predict_one_pic(left_eye, rknn_ctx_ecd, rknn_io_num_ecd);
-                            if (res == 1)
-                            {
-                                cout << "[ECD] Left eyes open." << endl;
-                            }
-                            else
-                            {
-                                cout << "[ECD] Left eyes close." << endl;
-                            }
-                        }
-
-                        if (!right_eye.data)
-                        {
-                            printf("[ECD] No right eyes detect.");
-                        }
-                        else
-                        {
-                            // rknn_input_output_num io_num = print_model_info(ctx);
-                            int res = predict_one_pic(right_eye, rknn_ctx_ecd, rknn_io_num_ecd);
-                            if (res == 1)
-                            {
-                                cout << "[ECD] Right eyes open." << endl;
-                            }
-                            else
-                            {
-                                cout << "[ECD] Right eyes close." << endl;
-                            }
-                        }
-                    }
-                    
-                    long timer_interval = getCurrentTimeMsec() - timer_start;
-                    printf("[ECD][%d] process takes %ld ms.\n", rga_image_prev_id, timer_interval);
+                    printf("[ECD] Failed to set rknn input! Returned %d.\n", r);
                 }
-                catch (exception& e)
+                else
                 {
-                    cout << "\n[ECD] Exception thrown!" << endl;
-                    cout << e.what() << endl;
+                    // Run rknn.
+                    r = rknn_run(rknn_ctx_ecd, NULL);
+
+                    if(r < 0)
+                    {
+                        printf("[ECD] Failed to run rknn! Returned %d.\n", r);
+                    }
+                    else
+                    {
+                        // Get Output.
+                        rknn_output outputs[2];
+                        memset(outputs, 0, sizeof(outputs));
+                        outputs[0].want_float = 1;
+                        outputs[1].want_float = 1;
+                        r = rknn_outputs_get(rknn_ctx_ecd, rknn_io_num_ecd.n_output, outputs, NULL);
+
+                        if(r < 0)
+                        {
+                            printf("[ECD] Failed to get rknn output! Returned %d.\n", r);
+                        }
+                        else
+                        {
+                            // Deal with output.
+                            
+                            // Release rknn_outputs.
+                            rknn_outputs_release(rknn_ctx_ecd, 2, outputs);
+
+                            // Write annotated image to disk.
+                            if(get_config_HMW_recording_enable())
+                            {
+                                FILE* fout = nullptr;
+                                char filename[100] = "";
+                                char output_path[100] = "";
+
+                                strcat(output_path, get_config_HMW_recording_path());
+
+                                // Remove trailing slash.
+                                if(output_path[strlen(output_path) - 1] == '/')
+                                {
+                                    output_path[strlen(output_path) - 1] = '\0';
+                                }
+
+                                sprintf(filename, "%s/ECD_%d.raw", output_path, ecd_rga_image_prev_id);
+                                fout = fopen(filename, "wb");
+                                fwrite(ecd_image_addr, 1, ECD_RGA_BUFFER_OUTPUT_SIZE, fout);
+                                fclose(fout);
+                            }
+
+                            long timer_interval = getCurrentTimeMsec() - timer_start;
+                            printf("[ECD][%d] process takes %ld ms.\n", ecd_rga_image_prev_id, timer_interval);
+                        }
+                    }
                 }
             }
         }
@@ -1336,18 +1510,40 @@ void put_text(char* image_addr, int image_width, int image_height, int x, int y,
 }
 
 
-void crop_hFlip_image(uint8_t* source_image, uint8_t* dest_image)
+void hFlip_image(uint8_t* image, int width, int height)
 {
-    // row.
-    for(int i=0; i<RGA_OUTPUT_HEIGHT; ++i)
+    uint8_t tmp;
+
+    // Row.
+    for(int i=0; i<height; ++i)
     {
-        // column.
-        for(int j=0; j<RGA_OUTPUT_HEIGHT; ++j)
+        // Column.
+        for(int j=0; j<width / 2; ++j)
         {
             // RGB.
             for(int k=0; k<3; ++k)
             {
-                dest_image[i*MODEL_INPUT_SIZE*3 + (RGA_OUTPUT_HEIGHT-j-1)*3 + k] = source_image[i*RGA_OUTPUT_WIDTH*3 + (RGA_OUTPUT_CROP_OFFSET+j)*3 + k];
+                tmp = image[i*width*3 + (width-j-1)*3 + k];
+                image[i*width*3 + (width-j-1)*3 + k] = image[i*width*3 + j*3 + k];
+                image[i*width*3 + j*3 + k] = tmp;
+            }
+        }
+    }
+}
+
+
+void hCrop_image(uint8_t* source_image, uint8_t* dest_image, int source_image_width, int dest_image_width, int dest_image_height, int crop_offset)
+{
+    // Row.
+    for(int i=0; i<dest_image_height; ++i)
+    {
+        // Column.
+        for(int j=0; j<dest_image_width; ++j)
+        {
+            // RGB.
+            for(int k=0; k<3; ++k)
+            {
+                dest_image[i*dest_image_width*3 + j*3 + k] = source_image[i*source_image_width*3 + (crop_offset+j)*3 + k];
             }
         }
     }
