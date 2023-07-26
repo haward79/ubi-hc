@@ -82,13 +82,13 @@ const int CAMERA_ID_OD = 0;
 const int CAMERA_ID_ECD = 1;
 
 // Check RGA hardware limitation at https://reurl.cc/y7n2W8 .
-const int OD_MODEL_INPUT_WIDTH      = 300;                   // Set this to image size of model input.
-const int OD_MODEL_INPUT_HEIGHT     = 300;                   // Set this to image size of model input.
-const int OD_RGA_INPUT_WIDTH        = 544;                   // Copy the value from mild.json .
-const int OD_RGA_INPUT_HEIGHT       = 304;                   // Copy the value from mild.json .
+const int OD_MODEL_INPUT_WIDTH      = 300;                    // Set this to image size of model input.
+const int OD_MODEL_INPUT_HEIGHT     = 300;                    // Set this to image size of model input.
+const int OD_RGA_INPUT_WIDTH        = 544;                    // Copy the value from mild.json .
+const int OD_RGA_INPUT_HEIGHT       = 304;                    // Copy the value from mild.json .
 const int OD_RGA_OUTPUT_WIDTH       = 532;                    // Calculate from RGA_INPUT_* .
 const int OD_RGA_OUTPUT_HEIGHT      = OD_MODEL_INPUT_HEIGHT;  // Calculate from RGA_INPUT_* .
-const int OD_RGA_OUTPUT_CROP_OFFSET = 116;                   // Crop left part and right part to make the image from 16:9 to 1:1 .
+const int OD_RGA_OUTPUT_CROP_OFFSET = 116;                    // Crop left part and right part to make the image from 16:9 to 1:1 .
 
 const int OD_RGA_BUFFER_INPUT_SIZE  = OD_RGA_INPUT_WIDTH * OD_RGA_INPUT_HEIGHT * 3;
 const int OD_RGA_BUFFER_OUTPUT_SIZE = OD_RGA_OUTPUT_WIDTH * OD_RGA_OUTPUT_HEIGHT * 3;
@@ -252,7 +252,6 @@ static long getCurrentTimeMsec();
 
 
 // Main.
-
 int main()
 {
     // Define common color codes.
@@ -1015,6 +1014,7 @@ int predict_one_pic(cv::Mat img, rknn_context ctx, rknn_input_output_num io_num)
 {
     int ret, predict;
     rknn_input inputs[1];
+
     memset(inputs, 0, sizeof(inputs));
     inputs[0].index = 0;
     inputs[0].type = RKNN_TENSOR_UINT8;
@@ -1022,25 +1022,29 @@ int predict_one_pic(cv::Mat img, rknn_context ctx, rknn_input_output_num io_num)
     inputs[0].fmt = RKNN_TENSOR_NHWC;
     inputs[0].buf = img.data;
     ret = rknn_inputs_set(ctx, io_num.n_input, inputs);
-    if (ret < 0)
+
+    if(ret < 0)
     {
         throw std::runtime_error("rknn_inputs_set fail!");
     }
+
     ret = rknn_run(ctx, nullptr);
     rknn_output outputs[1];
     memset(outputs, 0, sizeof(outputs));
     outputs[0].want_float = 1;
     ret = rknn_outputs_get(ctx, 1, outputs, NULL);
+
     if (ret < 0)
     {
         throw std::runtime_error("rknn_outputs_get fail!");
     }
 
-    // Post Predict
+    // Post Predict.
     for (int i = 0; i < io_num.n_output; i++)
     {
         float *buffer = (float *)outputs[i].buf;
-        if (buffer[0] < 0.5)
+
+        if(buffer[0] < 0.5)
         {
             predict = 0;
         }
@@ -1049,8 +1053,10 @@ int predict_one_pic(cv::Mat img, rknn_context ctx, rknn_input_output_num io_num)
             predict = 1;
         }
     }
-    // Release rknn_outputs
+
+    // Release rknn_outputs.
     rknn_outputs_release(ctx, 1, outputs);
+
     return predict;
 }
 
@@ -1063,8 +1069,13 @@ static cv::Rect dlibRectangleToOpenCV(dlib::rectangle r)
 
 static void *detect_thread_handler(void *arg)
 {
+    // ECD initialization.
+    shape_predictor sp;
+    deserialize("model/shape_predictor_5_face_landmarks.dat") >> sp;
+
     while(1)
     {
+        // OD.
         if(od_rga_image_id > od_rga_image_prev_id)
         {
             od_rga_image_prev_id = od_rga_image_id;
@@ -1085,7 +1096,6 @@ static void *detect_thread_handler(void *arg)
                 int count_cars = 0;
                 int r = 0;
                 double e = 0;
-                struct json_object *HMW = NULL, *objectMark = NULL, *objectMark_enable = NULL;
 
                 // Set input image.
                 rknn_input input[1];
@@ -1324,6 +1334,7 @@ static void *detect_thread_handler(void *arg)
             }
         }
 
+        // ECD.
         if(ecd_rga_image_id > ecd_rga_image_prev_id)
         {
             ecd_rga_image_prev_id = ecd_rga_image_id;
@@ -1336,80 +1347,96 @@ static void *detect_thread_handler(void *arg)
 
             // ECD.
             {
+                const int MODEL_IN_WIDTH = 96;
+                const int MODEL_IN_HEIGHT = 96;
+                const int MODEL_IN_CHANNELS = 3;
                 long timer_start = getCurrentTimeMsec();
                 int r = 0;
-                struct json_object *HMW = NULL, *objectMark = NULL, *objectMark_enable = NULL;
+                dlib::array2d<dlib::rgb_pixel> img(ECD_RGA_OUTPUT_HEIGHT, ECD_RGA_OUTPUT_WIDTH);
 
-                // Set input image.
-                rknn_input input[1];
-                memset(input, 0, sizeof(input));
-                input[0].index = 0;
-                input[0].type = RKNN_TENSOR_UINT8;
-                input[0].size = ECD_RGA_BUFFER_OUTPUT_SIZE;
-                input[0].fmt = RKNN_TENSOR_NHWC;
-                input[0].buf = ecd_image_addr;
-
-                r = rknn_inputs_set(rknn_ctx_ecd, rknn_io_num_ecd.n_input, input);
-                
-                if(r < 0)
+                // Copy image to dlib object.
+                for(int r = 0; r < ECD_RGA_OUTPUT_HEIGHT; r++)
                 {
-                    printf("[ECD] Failed to set rknn input! Returned %d.\n", r);
-                }
-                else
-                {
-                    // Run rknn.
-                    r = rknn_run(rknn_ctx_ecd, NULL);
-
-                    if(r < 0)
+                    for(int c = 0; c < ECD_RGA_OUTPUT_WIDTH; c++)
                     {
-                        printf("[ECD] Failed to run rknn! Returned %d.\n", r);
+                        img[r][c] = dlib::rgb_pixel(ecd_image_addr[r * ECD_RGA_OUTPUT_WIDTH * 3 + c * 3 + 0],
+                                                    ecd_image_addr[r * ECD_RGA_OUTPUT_WIDTH * 3 + c * 3 + 1],
+                                                    ecd_image_addr[r * ECD_RGA_OUTPUT_WIDTH * 3 + c * 3 + 2]);
+                    }
+                }
+
+                frontal_face_detector detector = get_frontal_face_detector();
+
+                std::vector<rectangle> dets = detector(img);
+                printf("[ECD] Number of faces detected: %d\n", dets.size());
+
+                std::vector<full_object_detection> shapes;
+                for(unsigned long j = 0; j < dets.size(); ++j)
+                {
+                    full_object_detection shape = sp(img, dets[j]);
+                    cout << "[ECD] Number of parts: " << shape.num_parts() << endl;
+
+                    // rect (左, 上, 右, 下)
+                    // 右眼邊界 0-右 1-左
+                    int length = (shape.part(0).x() - shape.part(1).x()) / 2 + 5;
+                    rectangle rightrec(shape.part(1).x(), shape.part(1).y() - length, shape.part(0).x(), shape.part(0).y() + length);
+                    cv::Rect right_rec = dlibRectangleToOpenCV(rightrec);
+
+                    // 左眼邊界  2-右 3-左
+                    length = (shape.part(2).x() - shape.part(3).x()) / 2 + 5;
+                    rectangle leftrec(shape.part(3).x(), shape.part(3).y() - length, shape.part(2).x(), shape.part(2).y() + length);
+                    cv::Rect left_rec = dlibRectangleToOpenCV(leftrec);
+
+                    // 畫在原本讀進來的那張圖上
+                    // draw_rectangle(img, leftrec, dlib::rgb_pixel(255, 0, 0), 1);
+                    // draw_rectangle(img, rightrec, dlib::rgb_pixel(255, 0, 0), 1);
+                    cv::Mat org_img = dlib::toMat(img);
+                    cv::Mat right_eye = org_img(right_rec);
+                    cv::Mat left_eye = org_img(left_rec);
+                    
+                    // To 96 x 96 pixels.
+                    cv::resize(right_eye, right_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
+                    cv::resize(left_eye, left_eye, cv::Size(MODEL_IN_WIDTH, MODEL_IN_HEIGHT), (0, 0), (0, 0), cv::INTER_LINEAR);
+
+                    if(!left_eye.data)
+                    {
+                        printf("[ECD] No left eyes detect.");
                     }
                     else
                     {
-                        // Get Output.
-                        rknn_output outputs[2];
-                        memset(outputs, 0, sizeof(outputs));
-                        outputs[0].want_float = 1;
-                        outputs[1].want_float = 1;
-                        r = rknn_outputs_get(rknn_ctx_ecd, rknn_io_num_ecd.n_output, outputs, NULL);
-
-                        if(r < 0)
+                        // rknn_input_output_num io_num = print_model_info(ctx);
+                        int res = predict_one_pic(left_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+                        if (res == 1)
                         {
-                            printf("[ECD] Failed to get rknn output! Returned %d.\n", r);
+                            cout << "[ECD] Left eyes open." << endl;
                         }
                         else
                         {
-                            // Deal with output.
-                            
-                            // Release rknn_outputs.
-                            rknn_outputs_release(rknn_ctx_ecd, 2, outputs);
+                            cout << "[ECD] Left eyes close." << endl;
+                        }
+                    }
 
-                            // Write annotated image to disk.
-                            if(get_config_HMW_recording_enable())
-                            {
-                                FILE* fout = nullptr;
-                                char filename[100] = "";
-                                char output_path[100] = "";
-
-                                strcat(output_path, get_config_HMW_recording_path());
-
-                                // Remove trailing slash.
-                                if(output_path[strlen(output_path) - 1] == '/')
-                                {
-                                    output_path[strlen(output_path) - 1] = '\0';
-                                }
-
-                                sprintf(filename, "%s/ECD_%d.raw", output_path, ecd_rga_image_prev_id);
-                                fout = fopen(filename, "wb");
-                                fwrite(ecd_image_addr, 1, ECD_RGA_BUFFER_OUTPUT_SIZE, fout);
-                                fclose(fout);
-                            }
-
-                            long timer_interval = getCurrentTimeMsec() - timer_start;
-                            printf("[ECD][%d] process takes %ld ms.\n", ecd_rga_image_prev_id, timer_interval);
+                    if (!right_eye.data)
+                    {
+                        printf("[ECD] No right eyes detect.");
+                    }
+                    else
+                    {
+                        // rknn_input_output_num io_num = print_model_info(ctx);
+                        int res = predict_one_pic(right_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+                        if (res == 1)
+                        {
+                            cout << "[ECD] Right eyes open." << endl;
+                        }
+                        else
+                        {
+                            cout << "[ECD] Right eyes close." << endl;
                         }
                     }
                 }
+                
+                long timer_interval = getCurrentTimeMsec() - timer_start;
+                printf("[ECD][%d] process takes %ld ms.\n", ecd_rga_image_prev_id, timer_interval);
             }
         }
 
