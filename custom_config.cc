@@ -79,6 +79,32 @@ int get_config_outputDisplay_enable()
 }
 
 
+const char * get_config_nanomsg_address()
+{
+    struct json_object *nanomsg = NULL, *nanomsg_address = NULL;
+    const char * nanomsg_address_str = 0;
+
+    json_object_object_get_ex(read_configs(), "nanomsg", &nanomsg);
+    json_object_object_get_ex(nanomsg, "address", &nanomsg_address);
+    nanomsg_address_str = json_object_get_string(nanomsg_address);
+
+    return nanomsg_address_str;
+}
+
+
+int get_config_nanomsg_ignoreError()
+{
+    struct json_object *nanomsg = NULL, *nanomsg_ignoreError = NULL;
+    int nanomsg_ignoreError_int = 0;
+
+    json_object_object_get_ex(read_configs(), "nanomsg", &nanomsg);
+    json_object_object_get_ex(nanomsg, "ignoreError", &nanomsg_ignoreError);
+    nanomsg_ignoreError_int = json_object_get_int(nanomsg_ignoreError);
+
+    return nanomsg_ignoreError_int;
+}
+
+
 int get_config_soundAlert_enable()
 {
     struct json_object *soundAlert = NULL, *soundAlert_enable = NULL;
@@ -92,56 +118,111 @@ int get_config_soundAlert_enable()
 }
 
 
-int get_config_HMW_enable()
+int get_config_MCD_enable()
 {
-    struct json_object *HMW = NULL, *HMW_enable = NULL;
-    int HMW_enable_int = 0;
+    struct json_object *MCD = NULL, *MCD_enable = NULL;
+    int MCD_enable_int = 0;
 
-    json_object_object_get_ex(read_configs(), "HMW", &HMW);
-    json_object_object_get_ex(HMW, "enable", &HMW_enable);
-    HMW_enable_int = json_object_get_int(HMW_enable);
+    json_object_object_get_ex(read_configs(), "MCD", &MCD);
+    json_object_object_get_ex(MCD, "enable", &MCD_enable);
+    MCD_enable_int = json_object_get_int(MCD_enable);
 
-    return HMW_enable_int;
+    return MCD_enable_int;
 }
 
 
-int get_config_HMW_recording_enable()
+int get_config_MCD_recording_enable()
 {
-    struct json_object *HMW = NULL, *HMW_recording = NULL, *HMW_recording_enable = NULL;
-    int HMW_recording_enable_int = 0;
+    struct json_object *MCD = NULL, *MCD_recording = NULL, *MCD_recording_enable = NULL;
+    int MCD_recording_enable_int = 0;
 
-    json_object_object_get_ex(read_configs(), "HMW", &HMW);
-    json_object_object_get_ex(HMW, "recording", &HMW_recording);
-    json_object_object_get_ex(HMW_recording, "enable", &HMW_recording_enable);
-    HMW_recording_enable_int = json_object_get_int(HMW_recording_enable);
+    json_object_object_get_ex(read_configs(), "MCD", &MCD);
+    json_object_object_get_ex(MCD, "recording", &MCD_recording);
+    json_object_object_get_ex(MCD_recording, "enable", &MCD_recording_enable);
+    MCD_recording_enable_int = json_object_get_int(MCD_recording_enable);
 
-    return HMW_recording_enable_int;
+    return MCD_recording_enable_int;
 }
 
 
-const char *get_config_HMW_recording_path()
+const char *get_config_MCD_recording_path()
 {
-    struct json_object *HMW = NULL, *HMW_recording = NULL, *HMW_recording_path = NULL;
-    const char *HMW_recording_path_str = 0;
+    struct json_object *MCD = NULL, *MCD_recording = NULL, *MCD_recording_path = NULL;
+    const char *MCD_recording_path_str = NULL;
 
-    json_object_object_get_ex(read_configs(), "HMW", &HMW);
-    json_object_object_get_ex(HMW, "recording", &HMW_recording);
-    json_object_object_get_ex(HMW_recording, "path", &HMW_recording_path);
-    HMW_recording_path_str = json_object_get_string(HMW_recording_path);
+    json_object_object_get_ex(read_configs(), "MCD", &MCD);
+    json_object_object_get_ex(MCD, "recording", &MCD_recording);
+    json_object_object_get_ex(MCD_recording, "path", &MCD_recording_path);
+    MCD_recording_path_str = json_object_get_string(MCD_recording_path);
 
-    return HMW_recording_path_str;
+    return MCD_recording_path_str;
 }
 
 
-int get_config_HMW_objectMark_enable()
+int get_config_MCD_objectMark_enable()
 {
-    struct json_object *HMW = NULL, *HMW_objectMark = NULL, *HMW_objectMark_enable = NULL;
-    int HMW_objectMark_enable_int = 0;
+    struct json_object *MCD = NULL, *MCD_objectMark = NULL, *MCD_objectMark_enable = NULL;
+    int MCD_objectMark_enable_int = 0;
 
-    json_object_object_get_ex(read_configs(), "HMW", &HMW);
-    json_object_object_get_ex(HMW, "objectMark", &HMW_objectMark);
-    json_object_object_get_ex(HMW_objectMark, "enable", &HMW_objectMark_enable);
-    HMW_objectMark_enable_int = json_object_get_int(HMW_objectMark_enable);
+    json_object_object_get_ex(read_configs(), "MCD", &MCD);
+    json_object_object_get_ex(MCD, "objectMark", &MCD_objectMark);
+    json_object_object_get_ex(MCD_objectMark, "enable", &MCD_objectMark_enable);
+    MCD_objectMark_enable_int = json_object_get_int(MCD_objectMark_enable);
 
-    return HMW_objectMark_enable_int;
+    return MCD_objectMark_enable_int;
+}
+
+
+int get_config_ECD_enable()
+{
+    struct json_object *ECD = NULL, *ECD_enable = NULL;
+    int ECD_enable_int = 0;
+
+    json_object_object_get_ex(read_configs(), "ECD", &ECD);
+    json_object_object_get_ex(ECD, "enable", &ECD_enable);
+    ECD_enable_int = json_object_get_int(ECD_enable);
+
+    return ECD_enable_int;
+}
+
+
+int get_config_ECD_recording_enable()
+{
+    struct json_object *ECD = NULL, *ECD_recording = NULL, *ECD_recording_enable = NULL;
+    int ECD_recording_enable_int = 0;
+
+    json_object_object_get_ex(read_configs(), "ECD", &ECD);
+    json_object_object_get_ex(ECD, "recording", &ECD_recording);
+    json_object_object_get_ex(ECD_recording, "enable", &ECD_recording_enable);
+    ECD_recording_enable_int = json_object_get_int(ECD_recording_enable);
+
+    return ECD_recording_enable_int;
+}
+
+
+const char *get_config_ECD_recording_path()
+{
+    struct json_object *ECD = NULL, *ECD_recording = NULL, *ECD_recording_path = NULL;
+    const char *ECD_recording_path_str = NULL;
+
+    json_object_object_get_ex(read_configs(), "ECD", &ECD);
+    json_object_object_get_ex(ECD, "recording", &ECD_recording);
+    json_object_object_get_ex(ECD_recording, "path", &ECD_recording_path);
+    ECD_recording_path_str = json_object_get_string(ECD_recording_path);
+
+    return ECD_recording_path_str;
+}
+
+
+int get_config_ECD_objectMark_enable()
+{
+    struct json_object *ECD = NULL, *ECD_objectMark = NULL, *ECD_objectMark_enable = NULL;
+    int ECD_objectMark_enable_int = 0;
+
+    json_object_object_get_ex(read_configs(), "ECD", &ECD);
+    json_object_object_get_ex(ECD, "objectMark", &ECD_objectMark);
+    json_object_object_get_ex(ECD_objectMark, "enable", &ECD_objectMark_enable);
+    ECD_objectMark_enable_int = json_object_get_int(ECD_objectMark_enable);
+
+    return ECD_objectMark_enable_int;
 }

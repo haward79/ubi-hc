@@ -1,8 +1,16 @@
 
 /*
+ *  Important terms in this code.
+ *  
+ *  OD : Object Detection
+ *  MCD: Min Car Distance
+ *  ECD: Eye Close Detect
+ */
+
+/*
  *  Important parameters in mild.json .
  *
- *  OD
+ *  OD/MCD
  *  Camera 0:
  *      width: 544
  *      height: 304
@@ -12,6 +20,14 @@
  *      width: 640
  *      height: 360
  */
+
+#define ANSI_COLOR_RED     "\x1b[31m"
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_YELLOW  "\x1b[33m"
+#define ANSI_COLOR_BLUE    "\x1b[34m"
+#define ANSI_COLOR_MAGENTA "\x1b[35m"
+#define ANSI_COLOR_CYAN    "\x1b[36m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,8 +91,6 @@ using namespace dlib;
 
 // For nanomsg.
 int sock = 0;
-
-const int DEBUG_IGNORE_NANOMSG_ERROR = 1;
 
 const int CAMERA_ID_OD = 0;
 const int CAMERA_ID_ECD = 1;
@@ -272,45 +286,33 @@ int main()
     npu_config_json_get();  // Read mpower NPU configuration.
 
 
-    // Open raw stream.
-    // Raw stream is in NV16 color space.
-    // User has to call Rockchip native API to get frame data.
-    r = jmpp_raw_stream_open(CAMERA_ID_OD, &raw_stream_od);
-
-    if(r != 0)
+    if(get_config_MCD_enable())
     {
-        printf("[OD] Can NOT open RAW stream.\n");
-    }
+        printf(ANSI_COLOR_GREEN "MCD is ENABLED in configuration file.\n" ANSI_COLOR_RESET);
 
+        // Open raw stream.
+        // Raw stream is in NV16 color space.
+        // User has to call Rockchip native API to get frame data.
+        r = jmpp_raw_stream_open(CAMERA_ID_OD, &raw_stream_od);
 
-    r = jmpp_raw_stream_open(CAMERA_ID_ECD, &raw_stream_ecd);
+        if(r != 0)
+        {
+            printf("[OD] Can NOT open RAW stream.\n");
+        }
 
-    if(r != 0)
-    {
-        printf("[ECD] Can NOT open RAW stream.\n");
-    }
+        // User can use vi_pipe and vi_chn to call rockchip API to get data.
+        // It is possible to get VI data if vi_chn is known.
+        // It is possible to bind VI data to one or mutiple RGA if vi_chn is known.
+        // 
+        // There are different ways to get frame data, either using RK_MPI_SYS_GetMediaBuffer()
+        // or RK_MPI_SYS_RegisterOutCb(). But application may have to create thread when calling them.
+        raw_stream_vi_pipe_od = jmpp_raw_stream_vi_pipe(CAMERA_ID_OD, &raw_stream_od);
+        raw_stream_vi_chn_od = jmpp_raw_stream_vi_chn(CAMERA_ID_OD, &raw_stream_od);
 
-
-
-    // user can use vi_pipe and vi_chn to call rockchip API to get data.
-    // It is possible to get VI data if vi_chn is known.
-    // It is possible to bind VI data to one or mutiple RGA if vi_chn is known.
-    // 
-    // There are different ways to get frame data, either using RK_MPI_SYS_GetMediaBuffer()
-    // or RK_MPI_SYS_RegisterOutCb(). But application may have to create thread when calling them.
-    raw_stream_vi_pipe_od = jmpp_raw_stream_vi_pipe(CAMERA_ID_OD, &raw_stream_od);
-    raw_stream_vi_chn_od = jmpp_raw_stream_vi_chn(CAMERA_ID_OD, &raw_stream_od);
-
-    raw_stream_vi_pipe_ecd = jmpp_raw_stream_vi_pipe(CAMERA_ID_ECD, &raw_stream_ecd);
-    raw_stream_vi_chn_ecd = jmpp_raw_stream_vi_chn(CAMERA_ID_ECD, &raw_stream_ecd);
-
-    // OD.
-    {
         // RGA[12] color space conversation.
-        
         RGA_ATTR_S stRgaAttr;
         stRgaAttr.bEnBufPool = RK_TRUE;
-        stRgaAttr.u16BufPoolCnt = 2;  // Please do not set too many. 2 is default
+        stRgaAttr.u16BufPoolCnt = 2;  // Please do not set too many. 2 is default.
         stRgaAttr.u16Rotaion = 0;
         stRgaAttr.stImgIn.u32X = 0;
         stRgaAttr.stImgIn.u32Y = 0;
@@ -328,7 +330,7 @@ int main()
         stRgaAttr.stImgOut.u32HorStride = OD_RGA_OUTPUT_WIDTH;
         stRgaAttr.stImgOut.u32VirStride = OD_RGA_OUTPUT_HEIGHT;
 
-        // RGA channel 12 .. 15 can be used with rockchip native API
+        // RGA channel 12 .. 15 can be used with rockchip native API.
         r = RK_MPI_RGA_CreateChn(12, &stRgaAttr);
         
         if(r)
@@ -336,7 +338,7 @@ int main()
             printf("[OD] ERROR: Create rga[12] falied! ret=%d\n", r);
         }
 
-        // register a callback when there is a data on rga channel 12
+        // Register a callback when there is a data on rga channel 12.
         MPP_CHN_S stEncChn;
 
         stEncChn.enModId = RK_ID_RGA;
@@ -348,15 +350,127 @@ int main()
         {
             printf("[OD] ERROR: Register cb for RGA CB error! code:%d\n", r);
         }
+
+        // starting the VI -> RGA[12], VI -> RGA[13] pipeline data.
+        // VI automatically starts capturing data after binding is completed.
+        MPP_CHN_S stSrcChn;
+        stSrcChn.enModId = RK_ID_VI;
+        stSrcChn.s32DevId = raw_stream_vi_pipe_od;
+        stSrcChn.s32ChnId = raw_stream_vi_chn_od;
+        MPP_CHN_S stDestChn;
+        stDestChn.enModId = RK_ID_RGA;
+        stDestChn.s32DevId = 0;
+        stDestChn.s32ChnId = 12;
+        
+        r = RK_MPI_SYS_Bind(&stSrcChn, &stDestChn);
+        
+        if(r)
+        {
+            printf("[OD] ERROR: Bind vi[%d:%d] and rga[12] failed! ret=%d\n", raw_stream_vi_pipe_od, raw_stream_vi_chn_od, r);
+        }
+
+        // Preload OD rknn model.
+        printf("Loading OD model ...\n");
+        model_od = load_model(OD_MODEL_PATH, &model_od_len);
+        r = rknn_init(&rknn_ctx_od, model_od, model_od_len, 0);
+        
+        if(r < 0)
+        {
+            printf("rknn initialization failed! Returned %d.\n", r);
+        }
+        else
+        {
+            // Get Model Input Output Info
+            r = rknn_query(rknn_ctx_od, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_od, sizeof(rknn_io_num_od));
+            
+            if(r != RKNN_SUCC)
+            {
+                printf("rknn query failed! Return %d.\n", r);
+            }
+            else
+            {
+                printf("Model loaded successfully.\n");
+                printf("Model input num: %d, output num: %d\n", rknn_io_num_od.n_input, rknn_io_num_od.n_output);
+
+                {
+                    printf("Model input tensors:\n");
+                    
+                    rknn_tensor_attr input_attrs[rknn_io_num_od.n_input];
+                    memset(input_attrs, 0, sizeof(input_attrs));
+                    
+                    for(unsigned int i = 0; i < rknn_io_num_od.n_input; i++)
+                    {
+                        input_attrs[i].index = i;
+                        r = rknn_query(rknn_ctx_od, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+                        
+                        if(r != RKNN_SUCC)
+                        {
+                            printf("Failed to query rknn input tensor.\n");
+                        }
+                        else
+                        {
+                            print_rknn_tensor(&(input_attrs[i]));
+                        }
+                    }
+                }
+
+                {
+                    printf("Model output tensors:\n");
+                    
+                    rknn_tensor_attr output_attrs[rknn_io_num_od.n_output];
+                    memset(output_attrs, 0, sizeof(output_attrs));
+                    
+                    for(unsigned int i = 0; i < rknn_io_num_od.n_output; i++)
+                    {
+                        output_attrs[i].index = i;
+                        r = rknn_query(rknn_ctx_od, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
+
+                        if(r != RKNN_SUCC)
+                        {
+                            printf("Failed to query rknn output tensor.\n");
+                        }
+                        else
+                        {
+                            print_rknn_tensor(&(output_attrs[i]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        printf(ANSI_COLOR_GREEN "MCD is DISABLED in configuration file.\n" ANSI_COLOR_RESET);
     }
 
-    // ECD.
+
+    if(get_config_ECD_enable())
     {
+        printf(ANSI_COLOR_GREEN "ECD is ENABLED in configuration file.\n" ANSI_COLOR_RESET);
+
+        // Open raw stream.
+        // Raw stream is in NV16 color space.
+        // User has to call Rockchip native API to get frame data.
+        r = jmpp_raw_stream_open(CAMERA_ID_ECD, &raw_stream_ecd);
+
+        if(r != 0)
+        {
+            printf("[ECD] Can NOT open RAW stream.\n");
+        }
+
+        // User can use vi_pipe and vi_chn to call rockchip API to get data.
+        // It is possible to get VI data if vi_chn is known.
+        // It is possible to bind VI data to one or mutiple RGA if vi_chn is known.
+        // 
+        // There are different ways to get frame data, either using RK_MPI_SYS_GetMediaBuffer()
+        // or RK_MPI_SYS_RegisterOutCb(). But application may have to create thread when calling them.
+        raw_stream_vi_pipe_ecd = jmpp_raw_stream_vi_pipe(CAMERA_ID_ECD, &raw_stream_ecd);
+        raw_stream_vi_chn_ecd = jmpp_raw_stream_vi_chn(CAMERA_ID_ECD, &raw_stream_ecd);
+
         // RGA[14] color space conversation.
-        
         RGA_ATTR_S stRgaAttr;
         stRgaAttr.bEnBufPool = RK_TRUE;
-        stRgaAttr.u16BufPoolCnt = 2;  // Please do not set too many. 2 is default
+        stRgaAttr.u16BufPoolCnt = 2;  // Please do not set too many. 2 is default.
         stRgaAttr.u16Rotaion = 0;
         stRgaAttr.stImgIn.u32X = 0;
         stRgaAttr.stImgIn.u32Y = 0;
@@ -374,7 +488,7 @@ int main()
         stRgaAttr.stImgOut.u32HorStride = ECD_RGA_OUTPUT_WIDTH;
         stRgaAttr.stImgOut.u32VirStride = ECD_RGA_OUTPUT_HEIGHT;
 
-        // RGA channel 12 .. 15 can be used with rockchip native API
+        // RGA channel 12 .. 15 can be used with rockchip native API.
         r = RK_MPI_RGA_CreateChn(14, &stRgaAttr);
         
         if(r)
@@ -382,7 +496,7 @@ int main()
             printf("[ECD] ERROR: Create rga[14] falied! ret=%d\n", r);
         }
 
-        // register a callback when there is a data on rga channel 14
+        // Register a callback when there is a data on rga channel 14.
         MPP_CHN_S stEncChn;
 
         stEncChn.enModId = RK_ID_RGA;
@@ -394,34 +508,9 @@ int main()
         {
             printf("[ECD] ERROR: Register cb for RGA CB error! code:%d\n", r);
         }
-    }
 
-
-
-    // starting the VI -> RGA[12], VI -> RGA[13] pipeline data.
-    // VI automatically starts capturing data after binding is completed.
-
-    // OD.
-    {
-        MPP_CHN_S stSrcChn;
-        stSrcChn.enModId = RK_ID_VI;
-        stSrcChn.s32DevId = raw_stream_vi_pipe_od;
-        stSrcChn.s32ChnId = raw_stream_vi_chn_od;
-        MPP_CHN_S stDestChn;
-        stDestChn.enModId = RK_ID_RGA;
-        stDestChn.s32DevId = 0;
-        stDestChn.s32ChnId = 12;
-        
-        r = RK_MPI_SYS_Bind(&stSrcChn, &stDestChn);
-        
-        if(r)
-        {
-            printf("[OD] ERROR: Bind vi[%d:%d] and rga[12] failed! ret=%d\n", raw_stream_vi_pipe_od, raw_stream_vi_chn_od, r);
-        }
-    }
-
-    // ECD.
-    {
+        // starting the VI -> RGA[12], VI -> RGA[13] pipeline data.
+        // VI automatically starts capturing data after binding is completed.
         MPP_CHN_S stSrcChn;
         stSrcChn.enModId = RK_ID_VI;
         stSrcChn.s32DevId = raw_stream_vi_pipe_ecd;
@@ -437,165 +526,100 @@ int main()
         {
             printf("[ECD] ERROR: Bind vi[%d:%d] and rga[14] failed! ret=%d\n", raw_stream_vi_pipe_od, raw_stream_vi_chn_od, r);
         }
-    }
 
-
-
-    // Preload OD rknn model.
-    printf("Loading OD model ...\n");
-    model_od = load_model(OD_MODEL_PATH, &model_od_len);
-    r = rknn_init(&rknn_ctx_od, model_od, model_od_len, 0);
-    
-    if(r < 0)
-    {
-        printf("rknn initialization failed! Returned %d.\n", r);
-    }
-    else
-    {
-        // Get Model Input Output Info
-        r = rknn_query(rknn_ctx_od, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_od, sizeof(rknn_io_num_od));
+        // Preload ECD rknn model.
+        printf("Loading ECD model ...\n");
+        model_ecd = load_model(EC_MODEL_PATH, &model_ecd_len);
+        r = rknn_init(&rknn_ctx_ecd, model_ecd, model_ecd_len, 0);
         
-        if(r != RKNN_SUCC)
+        if(r < 0)
         {
-            printf("rknn query failed! Return %d.\n", r);
+            printf("rknn initialization failed! Returned %d.\n", r);
         }
         else
         {
-            printf("Model loaded successfully.\n");
-            printf("Model input num: %d, output num: %d\n", rknn_io_num_od.n_input, rknn_io_num_od.n_output);
-
+            // Get Model Input Output Info
+            r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_ecd, sizeof(rknn_io_num_ecd));
+            
+            if(r != RKNN_SUCC)
             {
-                printf("Model input tensors:\n");
-                
-                rknn_tensor_attr input_attrs[rknn_io_num_od.n_input];
-                memset(input_attrs, 0, sizeof(input_attrs));
-                
-                for(unsigned int i = 0; i < rknn_io_num_od.n_input; i++)
+                printf("rknn query failed! Return %d.\n", r);
+            }
+            else
+            {
+                printf("Model loaded successfully.\n");
+                printf("Model input num: %d, output num: %d\n", rknn_io_num_ecd.n_input, rknn_io_num_ecd.n_output);
+
                 {
-                    input_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx_od, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+                    printf("Model input tensors:\n");
                     
-                    if(r != RKNN_SUCC)
+                    rknn_tensor_attr input_attrs[rknn_io_num_ecd.n_input];
+                    memset(input_attrs, 0, sizeof(input_attrs));
+                    
+                    for(unsigned int i = 0; i < rknn_io_num_ecd.n_input; i++)
                     {
-                        printf("Failed to query rknn input tensor.\n");
-                    }
-                    else
-                    {
-                        print_rknn_tensor(&(input_attrs[i]));
+                        input_attrs[i].index = i;
+                        r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
+                        
+                        if(r != RKNN_SUCC)
+                        {
+                            printf("Failed to query rknn input tensor.\n");
+                        }
+                        else
+                        {
+                            print_rknn_tensor(&(input_attrs[i]));
+                        }
                     }
                 }
-            }
 
-            {
-                printf("Model output tensors:\n");
-                
-                rknn_tensor_attr output_attrs[rknn_io_num_od.n_output];
-                memset(output_attrs, 0, sizeof(output_attrs));
-                
-                for(unsigned int i = 0; i < rknn_io_num_od.n_output; i++)
                 {
-                    output_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx_od, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
+                    printf("Model output tensors:\n");
+                    
+                    rknn_tensor_attr output_attrs[rknn_io_num_ecd.n_output];
+                    memset(output_attrs, 0, sizeof(output_attrs));
+                    
+                    for(unsigned int i = 0; i < rknn_io_num_ecd.n_output; i++)
+                    {
+                        output_attrs[i].index = i;
+                        r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
 
-                    if(r != RKNN_SUCC)
-                    {
-                        printf("Failed to query rknn output tensor.\n");
-                    }
-                    else
-                    {
-                        print_rknn_tensor(&(output_attrs[i]));
+                        if(r != RKNN_SUCC)
+                        {
+                            printf("Failed to query rknn output tensor.\n");
+                        }
+                        else
+                        {
+                            print_rknn_tensor(&(output_attrs[i]));
+                        }
                     }
                 }
             }
         }
-    }
-
-    // Preload ECD rknn model.
-    printf("Loading ECD model ...\n");
-    model_ecd = load_model(EC_MODEL_PATH, &model_ecd_len);
-    r = rknn_init(&rknn_ctx_ecd, model_ecd, model_ecd_len, 0);
-    
-    if(r < 0)
-    {
-        printf("rknn initialization failed! Returned %d.\n", r);
     }
     else
     {
-        // Get Model Input Output Info
-        r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_IN_OUT_NUM, &rknn_io_num_ecd, sizeof(rknn_io_num_ecd));
-        
-        if(r != RKNN_SUCC)
-        {
-            printf("rknn query failed! Return %d.\n", r);
-        }
-        else
-        {
-            printf("Model loaded successfully.\n");
-            printf("Model input num: %d, output num: %d\n", rknn_io_num_ecd.n_input, rknn_io_num_ecd.n_output);
-
-            {
-                printf("Model input tensors:\n");
-                
-                rknn_tensor_attr input_attrs[rknn_io_num_ecd.n_input];
-                memset(input_attrs, 0, sizeof(input_attrs));
-                
-                for(unsigned int i = 0; i < rknn_io_num_ecd.n_input; i++)
-                {
-                    input_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
-                    
-                    if(r != RKNN_SUCC)
-                    {
-                        printf("Failed to query rknn input tensor.\n");
-                    }
-                    else
-                    {
-                        print_rknn_tensor(&(input_attrs[i]));
-                    }
-                }
-            }
-
-            {
-                printf("Model output tensors:\n");
-                
-                rknn_tensor_attr output_attrs[rknn_io_num_ecd.n_output];
-                memset(output_attrs, 0, sizeof(output_attrs));
-                
-                for(unsigned int i = 0; i < rknn_io_num_ecd.n_output; i++)
-                {
-                    output_attrs[i].index = i;
-                    r = rknn_query(rknn_ctx_ecd, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
-
-                    if(r != RKNN_SUCC)
-                    {
-                        printf("Failed to query rknn output tensor.\n");
-                    }
-                    else
-                    {
-                        print_rknn_tensor(&(output_attrs[i]));
-                    }
-                }
-            }
-        }
+        printf(ANSI_COLOR_GREEN "ECD is DISABLED in configuration file.\n" ANSI_COLOR_RESET);
     }
 
-    // Setup nano msg.
+    // Setup nanomsg.
     while(1)
     {
+        printf(ANSI_COLOR_GREEN "Binding nanomsg to address: \"%s\" .\n" ANSI_COLOR_RESET, get_config_nanomsg_address());
+
         if((sock = nn_socket(AF_SP, NN_PUB)) < 0)
         {
-            printf("Nanomsg is NOT ready due to socket error chkpt 1.\n");
+            printf(ANSI_COLOR_RED "Nanomsg is NOT ready due to socket error chkpt 1.\n" ANSI_COLOR_RESET);
         }
         else
         {
-            if(nn_bind(sock, "tcp://192.168.1.5:5555") < 0)
+            if(nn_bind(sock, get_config_nanomsg_address()) < 0)
             {
-                printf("Nanomsg is NOT ready due to socket error chkpt 2.\n");
+                printf(ANSI_COLOR_RED "Nanomsg is NOT ready due to socket error chkpt 2.\n" ANSI_COLOR_RESET);
 
                 // For easy debug only.
-                if(DEBUG_IGNORE_NANOMSG_ERROR)
+                if(get_config_nanomsg_ignoreError())
                 {
-                    printf("Nanomsg is NOT ready but the program will still keep running.\n");
+                    printf(ANSI_COLOR_YELLOW "Nanomsg is NOT ready but the program will still keep running.\n" ANSI_COLOR_RESET);
                     break;
                 }
             }
@@ -614,19 +638,26 @@ int main()
     pthread_create(&detect_thread, NULL, detect_thread_handler, NULL);
     pthread_detach(detect_thread);
 
+    // Keep thread running.
     while(1)
     {
         ::sleep(1);
     }
 
     // Release resources.
-    jmpp_raw_stream_stop(CAMERA_ID_OD, &raw_stream_od);
-    jmpp_raw_stream_close(CAMERA_ID_OD, &raw_stream_od);
-    printf("[OD] JMPP raw stream released.\n");
+    if(get_config_MCD_enable())
+    {
+        jmpp_raw_stream_stop(CAMERA_ID_OD, &raw_stream_od);
+        jmpp_raw_stream_close(CAMERA_ID_OD, &raw_stream_od);
+        printf("[OD] JMPP raw stream released.\n");
+    }
 
-    jmpp_raw_stream_stop(CAMERA_ID_ECD, &raw_stream_ecd);
-    jmpp_raw_stream_close(CAMERA_ID_ECD, &raw_stream_ecd);
-    printf("[ECD] JMPP raw stream released.\n");
+    if(get_config_ECD_enable())
+    {
+        jmpp_raw_stream_stop(CAMERA_ID_ECD, &raw_stream_ecd);
+        jmpp_raw_stream_close(CAMERA_ID_ECD, &raw_stream_ecd);
+        printf("[ECD] JMPP raw stream released.\n");
+    }
 
     free(od_rga_image_buffer_addr);
     free(od_image_temp_addr);
@@ -638,25 +669,25 @@ int main()
     if(rknn_ctx_od)
     {
         rknn_destroy(rknn_ctx_od);
-        printf("od rknn context released.\n");
+        printf("[OD] rknn context released.\n");
     }
 
     if(rknn_ctx_ecd)
     {
         rknn_destroy(rknn_ctx_ecd);
-        printf("ecd rknn context released.\n");
+        printf("[ECD] rknn context released.\n");
     }
     
     if(model_od)
     {
         free(model_od);
-        printf("od rknn model released.\n");
+        printf("[OD] rknn model released.\n");
     }
 
     if(model_ecd)
     {
         free(model_ecd);
-        printf("ecd rknn model released.\n");
+        printf("[ECD] rknn model released.\n");
     }
 
     return 0;
@@ -1070,14 +1101,17 @@ static cv::Rect dlibRectangleToOpenCV(dlib::rectangle r)
 static void *detect_thread_handler(void *arg)
 {
     // ECD initialization.
+    frontal_face_detector detector = get_frontal_face_detector();
     shape_predictor sp;
     deserialize("model/shape_predictor_5_face_landmarks.dat") >> sp;
 
     while(1)
     {
-        // OD.
-        if(od_rga_image_id > od_rga_image_prev_id)
+        // MCD.
+        if(get_config_MCD_enable() && (od_rga_image_id > od_rga_image_prev_id))
         {
+            printf(ANSI_COLOR_GREEN "[MCD] Process an image.\n" ANSI_COLOR_RESET);
+
             od_rga_image_prev_id = od_rga_image_id;
 
             // Prevent from rga_chn12_frame_cb() overwrite.
@@ -1107,7 +1141,7 @@ static void *detect_thread_handler(void *arg)
                 input[0].buf = od_image_addr;
 
                 // Draw boundary of car detect zone.
-                if(get_config_HMW_objectMark_enable())
+                if(get_config_MCD_objectMark_enable())
                 {
                     draw_border((char *)od_image_addr,
                                     OD_MODEL_INPUT_WIDTH,
@@ -1193,7 +1227,7 @@ static void *detect_thread_handler(void *arg)
                                         det_result->prop);
 
                                     // Draw annotation on image.
-                                    if(get_config_HMW_objectMark_enable())
+                                    if(get_config_MCD_objectMark_enable())
                                     {
                                         int x = det_result->box.left;
                                         int y = det_result->box.top;
@@ -1223,7 +1257,7 @@ static void *detect_thread_handler(void *arg)
                                 else if(strcmp("car", det_result->name) == 0)
                                 {
                                     // Draw annotation on image.
-                                    if(get_config_HMW_objectMark_enable())
+                                    if(get_config_MCD_objectMark_enable())
                                     {
                                         int x = det_result->box.left;
                                         int y = det_result->box.top;
@@ -1274,7 +1308,7 @@ static void *detect_thread_handler(void *arg)
 
 
                             // Put min distance value on image.
-                            if(get_config_HMW_objectMark_enable())
+                            if(get_config_MCD_objectMark_enable())
                             {
                                 char min_meter_distance_str[100];
                                 sprintf(min_meter_distance_str, "%.2lf", min_meter_distance);
@@ -1283,13 +1317,13 @@ static void *detect_thread_handler(void *arg)
                             }
 
                             // Write annotated image to disk.
-                            if(get_config_HMW_recording_enable())
+                            if(get_config_MCD_recording_enable())
                             {
                                 FILE* fout = nullptr;
                                 char filename[100] = "";
                                 char output_path[100] = "";
 
-                                strcat(output_path, get_config_HMW_recording_path());
+                                strcat(output_path, get_config_MCD_recording_path());
 
                                 // Remove trailing slash.
                                 if(output_path[strlen(output_path) - 1] == '/')
@@ -1335,8 +1369,10 @@ static void *detect_thread_handler(void *arg)
         }
 
         // ECD.
-        if(ecd_rga_image_id > ecd_rga_image_prev_id)
+        if(get_config_ECD_enable() && (ecd_rga_image_id > ecd_rga_image_prev_id))
         {
+            printf(ANSI_COLOR_GREEN "[ECD] Process an image.\n" ANSI_COLOR_RESET);
+
             ecd_rga_image_prev_id = ecd_rga_image_id;
 
             // Prevent from rga_chn14_frame_cb() overwrite.
@@ -1365,15 +1401,21 @@ static void *detect_thread_handler(void *arg)
                     }
                 }
 
-                frontal_face_detector detector = get_frontal_face_detector();
-
+                long ECD_timer_start = getCurrentTimeMsec();
                 std::vector<rectangle> dets = detector(img);
+                long ECD_timer_interval = getCurrentTimeMsec() - ECD_timer_start;
+                printf("[ECD][%d] face detect process takes %ld ms.\n", ecd_rga_image_prev_id, ECD_timer_interval);
+
                 printf("[ECD] Number of faces detected: %d\n", dets.size());
 
                 std::vector<full_object_detection> shapes;
                 for(unsigned long j = 0; j < dets.size(); ++j)
                 {
+                    long ECD_timer_start = getCurrentTimeMsec();
                     full_object_detection shape = sp(img, dets[j]);
+                    long ECD_timer_interval = getCurrentTimeMsec() - ECD_timer_start;
+                    printf("[ECD][%d] shape detect process takes %ld ms.\n", ecd_rga_image_prev_id, ECD_timer_interval);
+
                     cout << "[ECD] Number of parts: " << shape.num_parts() << endl;
 
                     // rect (左, 上, 右, 下)
@@ -1406,6 +1448,7 @@ static void *detect_thread_handler(void *arg)
                     {
                         // rknn_input_output_num io_num = print_model_info(ctx);
                         int res = predict_one_pic(left_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+
                         if (res == 1)
                         {
                             cout << "[ECD] Left eyes open." << endl;
@@ -1424,6 +1467,7 @@ static void *detect_thread_handler(void *arg)
                     {
                         // rknn_input_output_num io_num = print_model_info(ctx);
                         int res = predict_one_pic(right_eye, rknn_ctx_ecd, rknn_io_num_ecd);
+
                         if (res == 1)
                         {
                             cout << "[ECD] Right eyes open." << endl;
