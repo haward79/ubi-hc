@@ -1794,9 +1794,9 @@ static void *detect_thread_handler(void *arg)
                                 }
 
                                 sprintf(filename, "%s/MCD_%d.raw", output_path, od_rga_image_prev_id);
-                                fout = fopen(filename, "wb");
+                                /* fout = fopen(filename, "wb");
                                 fwrite(od_image_addr, 1, OD_RGA_BUFFER_CROPPED_SIZE, fout);
-                                fclose(fout);
+                                fclose(fout); */
                             }
 
                             long timer_interval = getCurrentTimeMsec() - timer_start;
@@ -1945,9 +1945,9 @@ static void *detect_thread_handler(void *arg)
                                 }
 
                                 sprintf(filename, "%s/BSL_%d.raw", output_path, bsl_rga_image_prev_id);
-                                fout = fopen(filename, "wb");
+                                /* fout = fopen(filename, "wb");
                                 fwrite(bsl_image_addr, 1, OD_RGA_BUFFER_CROPPED_SIZE, fout);
-                                fclose(fout);
+                                fclose(fout); */
                             }
 
                             long timer_interval = getCurrentTimeMsec() - timer_start;
@@ -2073,9 +2073,9 @@ static void *detect_thread_handler(void *arg)
                                 }
 
                                 sprintf(filename, "%s/BSR_%d.raw", output_path, bsr_rga_image_prev_id);
-                                fout = fopen(filename, "wb");
+                                /* fout = fopen(filename, "wb");
                                 fwrite(bsr_image_addr, 1, OD_RGA_BUFFER_CROPPED_SIZE, fout);
-                                fclose(fout);
+                                fclose(fout); */
                             }
 
                             long timer_interval = getCurrentTimeMsec() - timer_start;

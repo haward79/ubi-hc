@@ -32,7 +32,7 @@ typedef struct _nycu_mhw_alarm_event_
 	} front_vehicle_coord;    // front vehicle coordinate
 
 
-	struct timeval timestamp;
+	unsigned long long int timestamp;
 	
 	float front_vehicle_distance;       // -1: invalid
 

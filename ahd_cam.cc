@@ -31,6 +31,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctime>
 #include <math.h>
 #include <string.h>
 #include <signal.h>
@@ -601,7 +602,7 @@ int main()
         printf(ANSI_COLOR_GREEN "ECD is DISABLED in configuration file.\n" ANSI_COLOR_RESET);
     }
 
-    // Setup nanomsg.
+    // Setup nanomsg server.
     while(1)
     {
         printf(ANSI_COLOR_GREEN "Binding nanomsg to address: \"%s\" .\n" ANSI_COLOR_RESET, get_config_nanomsg_address());
@@ -615,6 +616,7 @@ int main()
             if(nn_bind(sock, get_config_nanomsg_address()) < 0)
             {
                 printf(ANSI_COLOR_RED "Nanomsg is NOT ready due to socket error chkpt 2.\n" ANSI_COLOR_RESET);
+                printf("Error code is %d.\n", nn_bind(sock, get_config_nanomsg_address()));
 
                 // For easy debug only.
                 if(get_config_nanomsg_ignoreError())
@@ -1348,7 +1350,7 @@ static void *detect_thread_handler(void *arg)
                             ae.front_vehicle_coord.top_x = min_distance_boundary_top;
                             ae.front_vehicle_coord.bottom_x = min_distance_boundary_right;
                             ae.front_vehicle_coord.bottom_y = min_distance_boundary_bottom;
-                            gettimeofday(&ae.timestamp, NULL);
+                            ae.timestamp = (unsigned long long int)std::time(0);
                             ae.front_vehicle_distance = (float)min_meter_distance;
                             ae.car_speed = -1;
                             
@@ -1360,7 +1362,7 @@ static void *detect_thread_handler(void *arg)
                             }
                             else
                             {
-                                printf("Data is published successfully.\n");
+                                printf("Data is published successfully. (%ld bytes)\n", sizeof(ae));
                             }
                         }
                     }
